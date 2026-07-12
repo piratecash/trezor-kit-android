@@ -23,7 +23,9 @@ import com.satoshilabs.trezor.lib.protobuf.TrezorMessageBitcoin.TxRequest
 import com.satoshilabs.trezor.lib.protobuf.TrezorMessageBitcoin.TxRequest.RequestType
 import com.satoshilabs.trezor.lib.protobuf.TrezorMessageCommon.ButtonRequest
 import com.satoshilabs.trezor.lib.protobuf.TrezorMessageCommon.HDNodeType
+import com.satoshilabs.trezor.lib.protobuf.TrezorMessageEthereum.EthereumMessageSignature
 import com.satoshilabs.trezor.lib.protobuf.TrezorMessageEthereum.EthereumPublicKey
+import com.satoshilabs.trezor.lib.protobuf.TrezorMessageEthereum.EthereumSignMessage
 import com.satoshilabs.trezor.lib.protobuf.TrezorMessageEthereum.EthereumTxAck
 import com.satoshilabs.trezor.lib.protobuf.TrezorMessageEthereum.EthereumTxRequest
 import com.satoshilabs.trezor.lib.protobuf.TrezorMessageManagement.Features
@@ -571,6 +573,30 @@ class UsbTrezorClientTest {
         }
 
         assertTrue(caught != null)
+    }
+
+    @Test
+    fun signEthereumMessage_happyPath_sendsRequestAndReturnsSignature() = runTest(UnconfinedTestDispatcher()) {
+        val signature = ByteArray(65) { it.toByte() }
+        val address = "0x1111111111111111111111111111111111111111"
+        val response = EthereumMessageSignature.newBuilder()
+            .setSignature(ByteString.copyFrom(signature))
+            .setAddress(address)
+            .build()
+        val (client, transport) = clientWithResponses(
+            UnconfinedTestDispatcher(testScheduler),
+            MessageType.MessageType_EthereumMessageSignature_VALUE to response.toByteArray(),
+        )
+        val message = "Hello Trezor".toByteArray()
+
+        val result = client.connect { signEthereumMessage(listOf(44, 60, 0, 0, 0), message) }
+
+        assertEquals(TrezorMessageSignature(signature = signature, address = address), result)
+        val sentMessages = transport.sentMessagesAfterInit()
+        assertEquals(listOf(MessageType.MessageType_EthereumSignMessage_VALUE), sentMessages.map { it.msgType })
+        val sentRequest = EthereumSignMessage.parseFrom(sentMessages[0].payload)
+        assertEquals(listOf(44, 60, 0, 0, 0), sentRequest.addressNList)
+        assertArrayEquals(message, sentRequest.message.toByteArray())
     }
 
     @Test

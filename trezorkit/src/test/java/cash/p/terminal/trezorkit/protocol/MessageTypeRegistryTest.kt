@@ -6,6 +6,8 @@ import com.satoshilabs.trezor.lib.protobuf.TrezorMessageBitcoin.PublicKey
 import com.satoshilabs.trezor.lib.protobuf.TrezorMessageCommon.Failure
 import com.satoshilabs.trezor.lib.protobuf.TrezorMessageCommon.HDNodeType
 import com.satoshilabs.trezor.lib.protobuf.TrezorMessageEthereum.EthereumGetPublicKey
+import com.satoshilabs.trezor.lib.protobuf.TrezorMessageEthereum.EthereumMessageSignature
+import com.satoshilabs.trezor.lib.protobuf.TrezorMessageEthereum.EthereumSignMessage
 import com.satoshilabs.trezor.lib.protobuf.TrezorMessageManagement.Features
 import com.satoshilabs.trezor.lib.protobuf.TrezorMessageManagement.GetFeatures
 import com.satoshilabs.trezor.lib.protobuf.TrezorMessageManagement.Initialize
@@ -107,6 +109,25 @@ class MessageTypeRegistryTest {
         val original = StellarAddress.newBuilder().setAddress("GABC123").build()
 
         val parsed = MessageTypeRegistry.parse(208, original.toByteArray())
+
+        assertEquals(original, parsed)
+    }
+
+    @Test
+    fun typeOf_ethereumSignMessage_returnsMessageTypeNumberSixtyFour() {
+        val message = EthereumSignMessage.newBuilder().setMessage(ByteString.copyFrom(byteArrayOf(1))).build()
+
+        assertEquals(64, MessageTypeRegistry.typeOf(message))
+    }
+
+    @Test
+    fun parse_ethereumMessageSignaturePayload_returnsEquivalentMessage() {
+        val original = EthereumMessageSignature.newBuilder()
+            .setSignature(ByteString.copyFrom(byteArrayOf(1, 2, 3)))
+            .setAddress("0xabc123")
+            .build()
+
+        val parsed = MessageTypeRegistry.parse(66, original.toByteArray())
 
         assertEquals(original, parsed)
     }

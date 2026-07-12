@@ -18,7 +18,9 @@ import com.satoshilabs.trezor.lib.protobuf.TrezorMessageCommon.PassphraseAck
 import com.satoshilabs.trezor.lib.protobuf.TrezorMessageCommon.PassphraseRequest
 import com.satoshilabs.trezor.lib.protobuf.TrezorMessageCommon.Success
 import com.satoshilabs.trezor.lib.protobuf.TrezorMessageEthereum.EthereumGetPublicKey
+import com.satoshilabs.trezor.lib.protobuf.TrezorMessageEthereum.EthereumMessageSignature
 import com.satoshilabs.trezor.lib.protobuf.TrezorMessageEthereum.EthereumPublicKey
+import com.satoshilabs.trezor.lib.protobuf.TrezorMessageEthereum.EthereumSignMessage
 import com.satoshilabs.trezor.lib.protobuf.TrezorMessageEthereum.EthereumSignTx
 import com.satoshilabs.trezor.lib.protobuf.TrezorMessageEthereum.EthereumSignTxEIP1559
 import com.satoshilabs.trezor.lib.protobuf.TrezorMessageEthereum.EthereumTxAck
@@ -55,7 +57,8 @@ import kotlin.reflect.KClass
  * so on-device GetAddress is not needed for those coins), Stellar GetAddress+Address
  * (Stellar has no local derivation path, so the address itself is fetched from the device),
  * the EVM sign flow (EthereumSignTx, EthereumSignTxEIP1559, EthereumTxRequest,
- * EthereumTxAck), and the Bitcoin sign flow (SignTx, TxRequest, and the TxAck family).
+ * EthereumTxAck), the EVM personal-message sign flow (EthereumSignMessage,
+ * EthereumMessageSignature), and the Bitcoin sign flow (SignTx, TxRequest, and the TxAck family).
  * `HDNodeType` is not registered here - it is an embedded field type nested inside
  * `PublicKey`/`EthereumPublicKey`, never a standalone wire message.
  *
@@ -105,6 +108,12 @@ object MessageTypeRegistry {
         ),
         Entry(MessageType.MessageType_EthereumTxRequest_VALUE, EthereumTxRequest::class, EthereumTxRequest::parseFrom),
         Entry(MessageType.MessageType_EthereumTxAck_VALUE, EthereumTxAck::class, EthereumTxAck::parseFrom),
+        Entry(MessageType.MessageType_EthereumSignMessage_VALUE, EthereumSignMessage::class, EthereumSignMessage::parseFrom),
+        Entry(
+            MessageType.MessageType_EthereumMessageSignature_VALUE,
+            EthereumMessageSignature::class,
+            EthereumMessageSignature::parseFrom,
+        ),
         Entry(MessageType.MessageType_SignTx_VALUE, SignTx::class, SignTx::parseFrom),
         Entry(MessageType.MessageType_TxRequest_VALUE, TxRequest::class, TxRequest::parseFrom),
         Entry(MessageType.MessageType_TxAck_VALUE, TxAckInput::class, TxAckInput::parseFrom),

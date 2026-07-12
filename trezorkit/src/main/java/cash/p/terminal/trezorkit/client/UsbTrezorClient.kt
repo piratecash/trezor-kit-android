@@ -25,7 +25,9 @@ import com.satoshilabs.trezor.lib.protobuf.TrezorMessageBitcoin.TxRequest
 import com.satoshilabs.trezor.lib.protobuf.TrezorMessageBitcoin.TxRequest.RequestType
 import com.satoshilabs.trezor.lib.protobuf.TrezorMessageCommon.HDNodeType
 import com.satoshilabs.trezor.lib.protobuf.TrezorMessageEthereum.EthereumGetPublicKey
+import com.satoshilabs.trezor.lib.protobuf.TrezorMessageEthereum.EthereumMessageSignature
 import com.satoshilabs.trezor.lib.protobuf.TrezorMessageEthereum.EthereumPublicKey
+import com.satoshilabs.trezor.lib.protobuf.TrezorMessageEthereum.EthereumSignMessage
 import com.satoshilabs.trezor.lib.protobuf.TrezorMessageEthereum.EthereumSignTx
 import com.satoshilabs.trezor.lib.protobuf.TrezorMessageEthereum.EthereumSignTxEIP1559
 import com.satoshilabs.trezor.lib.protobuf.TrezorMessageEthereum.EthereumTxAck
@@ -153,6 +155,18 @@ private class SessionImpl(private val scope: TrezorSessionScope) : TrezorClientS
         val r = response.signatureR.toByteArray()
         val s = response.signatureS.toByteArray()
         return TrezorSignature(v = v, r = r, s = s, serializedTx = tx.toSerializedTx(v, r, s))
+    }
+
+    override suspend fun signEthereumMessage(addressN: List<Int>, message: ByteArray): TrezorMessageSignature {
+        val request = EthereumSignMessage.newBuilder()
+            .addAllAddressN(addressN)
+            .setMessage(ByteString.copyFrom(message))
+            .build()
+        val response = scope.exchangeTyped<EthereumMessageSignature>(request)
+        return TrezorMessageSignature(
+            signature = response.signature.toByteArray(),
+            address = response.address,
+        )
     }
 
     override suspend fun signBitcoin(

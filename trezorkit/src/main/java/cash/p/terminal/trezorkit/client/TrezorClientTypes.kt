@@ -116,6 +116,17 @@ data class TrezorEvmTx(
     }
 }
 
+/** Result of signing an EIP-191 personal message on-device: the raw signature and the signing address. */
+data class TrezorMessageSignature(val signature: ByteArray, val address: String) {
+    override fun equals(other: Any?): Boolean {
+        if (this === other) return true
+        if (other !is TrezorMessageSignature) return false
+        return signature.contentEquals(other.signature) && address == other.address
+    }
+
+    override fun hashCode(): Int = 31 * signature.contentHashCode() + address.hashCode()
+}
+
 /**
  * A device-computed signature. The USB client populates [serializedTx] by deterministically
  * re-assembling the signed transaction from the request fields and the device's v/r/s (the device
