@@ -40,6 +40,16 @@ import com.satoshilabs.trezor.lib.protobuf.TrezorMessageStellar.StellarPaymentOp
 import com.satoshilabs.trezor.lib.protobuf.TrezorMessageStellar.StellarSignTx
 import com.satoshilabs.trezor.lib.protobuf.TrezorMessageStellar.StellarSignedTx
 import com.satoshilabs.trezor.lib.protobuf.TrezorMessageStellar.StellarTxOpRequest
+import com.satoshilabs.trezor.lib.protobuf.TrezorMessageTron.TronAddress
+import com.satoshilabs.trezor.lib.protobuf.TrezorMessageTron.TronContractRequest
+import com.satoshilabs.trezor.lib.protobuf.TrezorMessageTron.TronFreezeBalanceV2Contract
+import com.satoshilabs.trezor.lib.protobuf.TrezorMessageTron.TronGetAddress
+import com.satoshilabs.trezor.lib.protobuf.TrezorMessageTron.TronRawTransaction
+import com.satoshilabs.trezor.lib.protobuf.TrezorMessageTron.TronRawTransaction.TronRawContract
+import com.satoshilabs.trezor.lib.protobuf.TrezorMessageTron.TronSignTx
+import com.satoshilabs.trezor.lib.protobuf.TrezorMessageTron.TronSignature
+import com.satoshilabs.trezor.lib.protobuf.TrezorMessageTron.TronTransferContract
+import com.satoshilabs.trezor.lib.protobuf.TrezorMessageTron.TronTriggerSmartContract
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
@@ -244,6 +254,24 @@ class UsbTrezorClientTest {
             ),
             result,
         )
+    }
+
+    @Test
+    fun getFeatures_deviceReportsTronCapability_setsSupportsTron() = runTest(UnconfinedTestDispatcher()) {
+        val features = Features.newBuilder()
+            .setInternalModel("T3B1")
+            .setMajorVersion(2)
+            .setMinorVersion(11)
+            .setPatchVersion(0)
+            .addCapabilities(Features.Capability.Capability_Tron)
+            .build()
+        val client = clientWithResponse(
+            MessageType.MessageType_Features_VALUE, features.toByteArray(), UnconfinedTestDispatcher(testScheduler),
+        )
+
+        val result = client.connect { getFeatures() }
+
+        assertTrue(result.supportsTron)
     }
 
     @Test
@@ -890,5 +918,191 @@ class UsbTrezorClientTest {
         assertEquals(createAccount.destination, createAccountOp.newAccount)
         assertEquals(createAccount.startingBalance, createAccountOp.startingBalance)
         assertEquals(false, createAccountOp.hasSourceAccount())
+    }
+
+    private val tronPath = listOf(44, 195, 0, 0, 0)
+
+    private fun tronTransferContract(): TronTransferContract = TronTransferContract.newBuilder()
+        .setOwnerAddress(ByteString.copyFrom(ByteArray(21) { 0x41 }))
+        .setToAddress(ByteString.copyFrom(ByteArray(21) { 0x42 }))
+        .setAmount(1_000_000L)
+        .build()
+
+    private fun tronRawContract(type: TronRawContract.TronRawContractType, parameterValue: ByteString): TronRawContract =
+        TronRawContract.newBuilder()
+            .setType(type)
+            .setParameter(
+                TronRawContract.TronRawParameter.newBuilder()
+                    .setTypeUrl("type.googleapis.com/protocol.${type.name}")
+                    .setValue(parameterValue),
+            )
+            .build()
+
+    private fun tronRawTransaction(
+        vararg contracts: TronRawContract,
+        data: ByteString? = null,
+        feeLimit: Long? = null,
+    ): ByteArray = TronRawTransaction.newBuilder()
+        .setRefBlockBytes(ByteString.copyFrom(byteArrayOf(0x1a, 0x2b)))
+        .setRefBlockHash(ByteString.copyFrom(ByteArray(8) { 7 }))
+        .setExpiration(1_700_000_060_000L)
+        .apply {
+            contracts.forEach { addContract(it) }
+            if (data != null) setData(data)
+            if (feeLimit != null) setFeeLimit(feeLimit)
+        }
+        .setTimestamp(1_700_000_000_000L)
+        .build()
+        .toByteArray()
+
+    private fun tronSignatureResponse(signature: ByteArray): Pair<Int, ByteArray> =
+        MessageType.MessageType_TronSignature_VALUE to
+            TronSignature.newBuilder().setSignature(ByteString.copyFrom(signature)).build().toByteArray()
+
+    private fun tronContractRequestResponse(): Pair<Int, ByteArray> =
+        MessageType.MessageType_TronContractRequest_VALUE to TronContractRequest.newBuilder().build().toByteArray()
+
+    /** Asserts signTron rejects [rawData] with nothing but the session-opening Initialize on the wire. */
+    private fun assertSignTronThrowsBeforeTronMessages(rawData: ByteArray) = runTest(UnconfinedTestDispatcher()) {
+        val (client, transport) = clientWithResponses(UnconfinedTestDispatcher(testScheduler))
+
+        var caught: TrezorException? = null
+        try {
+            client.connect { signTron(tronPath, rawData) }
+        } catch (e: TrezorException) {
+            caught = e
+        }
+
+        assertTrue(caught != null)
+        assertEquals(0, transport.sentMessagesAfterInit().size)
+    }
+
+    @Test
+    fun signTron_transferContract_sendsSignTxThenContractAndReturnsSignature() = runTest(UnconfinedTestDispatcher()) {
+        val transfer = tronTransferContract()
+        val rawData = tronRawTransaction(
+            tronRawContract(TronRawContract.TronRawContractType.TransferContract, transfer.toByteString()),
+        )
+        val signature = ByteArray(65) { 3 }
+        val (client, transport) = clientWithResponses(
+            UnconfinedTestDispatcher(testScheduler),
+            tronContractRequestResponse(),
+            tronSignatureResponse(signature),
+        )
+
+        val result = client.connect { signTron(tronPath, rawData) }
+
+        assertArrayEquals(signature, result)
+        val sentMessages = transport.sentMessagesAfterInit()
+        assertEquals(
+            listOf(MessageType.MessageType_TronSignTx_VALUE, MessageType.MessageType_TronTransferContract_VALUE),
+            sentMessages.map { it.msgType },
+        )
+        val signTx = TronSignTx.parseFrom(sentMessages[0].payload)
+        assertEquals(tronPath, signTx.addressNList)
+        assertArrayEquals(byteArrayOf(0x1a, 0x2b), signTx.refBlockBytes.toByteArray())
+        assertArrayEquals(ByteArray(8) { 7 }, signTx.refBlockHash.toByteArray())
+        assertEquals(1_700_000_060_000L, signTx.expiration)
+        assertEquals(1_700_000_000_000L, signTx.timestamp)
+        assertEquals(false, signTx.hasData())
+        assertEquals(false, signTx.hasFeeLimit())
+        assertEquals(transfer, TronTransferContract.parseFrom(sentMessages[1].payload))
+    }
+
+    @Test
+    fun signTron_triggerSmartContract_passesFeeLimitAndData() = runTest(UnconfinedTestDispatcher()) {
+        val trigger = TronTriggerSmartContract.newBuilder()
+            .setOwnerAddress(ByteString.copyFrom(ByteArray(21) { 0x41 }))
+            .setContractAddress(ByteString.copyFrom(ByteArray(21) { 0x43 }))
+            .setData(ByteString.copyFrom(ByteArray(68) { 5 }))
+            .build()
+        val memo = ByteString.copyFromUtf8("memo")
+        val rawData = tronRawTransaction(
+            tronRawContract(TronRawContract.TronRawContractType.TriggerSmartContract, trigger.toByteString()),
+            data = memo,
+            feeLimit = 100_000_000L,
+        )
+        val signature = ByteArray(65) { 4 }
+        val (client, transport) = clientWithResponses(
+            UnconfinedTestDispatcher(testScheduler),
+            tronContractRequestResponse(),
+            tronSignatureResponse(signature),
+        )
+
+        val result = client.connect { signTron(tronPath, rawData) }
+
+        assertArrayEquals(signature, result)
+        val sentMessages = transport.sentMessagesAfterInit()
+        assertEquals(
+            listOf(MessageType.MessageType_TronSignTx_VALUE, MessageType.MessageType_TronTriggerSmartContract_VALUE),
+            sentMessages.map { it.msgType },
+        )
+        val signTx = TronSignTx.parseFrom(sentMessages[0].payload)
+        assertEquals(100_000_000L, signTx.feeLimit)
+        assertArrayEquals(memo.toByteArray(), signTx.data.toByteArray())
+        assertEquals(trigger, TronTriggerSmartContract.parseFrom(sentMessages[1].payload))
+    }
+
+    @Test
+    fun signTron_unsupportedContractType_throwsBeforeTronMessages() {
+        val freeze = TronFreezeBalanceV2Contract.newBuilder()
+            .setOwnerAddress(ByteString.copyFrom(ByteArray(21) { 0x41 }))
+            .setBalance(1_000_000L)
+            .build()
+        assertSignTronThrowsBeforeTronMessages(
+            tronRawTransaction(
+                tronRawContract(TronRawContract.TronRawContractType.FreezeBalanceV2Contract, freeze.toByteString()),
+            ),
+        )
+    }
+
+    @Test
+    fun signTron_triggerWithCallValue_throwsBeforeTronMessages() {
+        val trigger = TronTriggerSmartContract.newBuilder()
+            .setOwnerAddress(ByteString.copyFrom(ByteArray(21) { 0x41 }))
+            .setContractAddress(ByteString.copyFrom(ByteArray(21) { 0x43 }))
+            .setData(ByteString.copyFrom(ByteArray(68) { 5 }))
+            .build()
+        // call_value is field 3 (varint) of Tron's real TriggerSmartContract - unknown to the Trezor protocol
+        val withCallValue = trigger.toByteString().concat(ByteString.copyFrom(byteArrayOf(0x18, 0x01)))
+        assertSignTronThrowsBeforeTronMessages(
+            tronRawTransaction(
+                tronRawContract(TronRawContract.TronRawContractType.TriggerSmartContract, withCallValue),
+            ),
+        )
+    }
+
+    @Test
+    fun signTron_unknownOuterField_throwsBeforeTronMessages() {
+        val valid = tronRawTransaction(
+            tronRawContract(TronRawContract.TronRawContractType.TransferContract, tronTransferContract().toByteString()),
+        )
+        // ref_block_num is field 3 (varint) of Tron's real raw transaction - unknown to the Trezor protocol
+        assertSignTronThrowsBeforeTronMessages(valid + byteArrayOf(0x18, 0x05))
+    }
+
+    @Test
+    fun signTron_multipleContracts_throwsBeforeTronMessages() {
+        val contract = tronRawContract(TronRawContract.TronRawContractType.TransferContract, tronTransferContract().toByteString())
+        assertSignTronThrowsBeforeTronMessages(tronRawTransaction(contract, contract))
+    }
+
+    @Test
+    fun getPublicKeys_tron_returnsAddressFromDevice() = runTest(UnconfinedTestDispatcher()) {
+        val tronAddress = TronAddress.newBuilder().setAddress("TTronAddressBase58").build()
+        val (client, transport) = clientWithResponses(
+            UnconfinedTestDispatcher(testScheduler),
+            MessageType.MessageType_TronAddress_VALUE to tronAddress.toByteArray(),
+        )
+
+        val result = client.connect { getPublicKeys(listOf(TrezorPublicKeyRequest.Tron(path = tronPath))) }
+
+        assertEquals(1, result.size)
+        assertEquals("TTronAddressBase58", result[0].key)
+        assertArrayEquals(ByteArray(0), result[0].publicKey)
+        assertArrayEquals(ByteArray(0), result[0].chainCode)
+        val sentMessages = transport.sentMessagesAfterInit()
+        assertEquals(listOf(MessageType.MessageType_TronGetAddress_VALUE), sentMessages.map { it.msgType })
+        assertEquals(tronPath, TronGetAddress.parseFrom(sentMessages[0].payload).addressNList)
     }
 }

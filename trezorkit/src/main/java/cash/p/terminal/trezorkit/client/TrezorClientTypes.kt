@@ -4,6 +4,8 @@ package cash.p.terminal.trezorkit.client
  * Neutral, protobuf-free snapshot of a Trezor device's `Features` response.
  *
  * [firmwareVersion] is assembled as `"major.minor.patch"`.
+ * [supportsTron] reflects the device's `Capability_Tron` (Tron signing landed in core firmware 2.11.0);
+ * older firmware rejects Tron messages, so callers must not request Tron derivation when it is false.
  */
 data class TrezorFeatures(
     val deviceId: String?,
@@ -12,6 +14,7 @@ data class TrezorFeatures(
     val firmwareVersion: String,
     val passphraseProtection: Boolean,
     val initialized: Boolean = true,
+    val supportsTron: Boolean = false,
 )
 
 /** One key/address derivation request, batched together in a single [TrezorClientSession.getPublicKeys] call. */
@@ -20,12 +23,13 @@ sealed interface TrezorPublicKeyRequest {
     data class Ethereum(val path: List<Int>) : TrezorPublicKeyRequest
     data class Solana(val path: List<Int>) : TrezorPublicKeyRequest
     data class Stellar(val path: List<Int>) : TrezorPublicKeyRequest
+    data class Tron(val path: List<Int>) : TrezorPublicKeyRequest
 }
 
 /**
  * Uniform result of one [TrezorPublicKeyRequest]. [key]'s meaning depends on the request type:
- * xpub for Bitcoin/Ethereum, hex-encoded public key for Solana, address for Stellar.
- * [chainCode] is empty for Solana/Stellar - neither has a BIP-32 chain code.
+ * xpub for Bitcoin/Ethereum, hex-encoded public key for Solana, address for Stellar/Tron.
+ * [chainCode] is empty for Solana/Stellar/Tron - none of them has a BIP-32 chain code.
  */
 data class TrezorKeyResult(
     val key: String,

@@ -14,6 +14,13 @@ import com.satoshilabs.trezor.lib.protobuf.TrezorMessageManagement.Initialize
 import com.satoshilabs.trezor.lib.protobuf.TrezorMessageSolana.SolanaGetPublicKey
 import com.satoshilabs.trezor.lib.protobuf.TrezorMessageStellar.StellarAddress
 import com.satoshilabs.trezor.lib.protobuf.TrezorMessageStellar.StellarGetAddress
+import com.satoshilabs.trezor.lib.protobuf.TrezorMessageTron.TronAddress
+import com.satoshilabs.trezor.lib.protobuf.TrezorMessageTron.TronContractRequest
+import com.satoshilabs.trezor.lib.protobuf.TrezorMessageTron.TronGetAddress
+import com.satoshilabs.trezor.lib.protobuf.TrezorMessageTron.TronSignTx
+import com.satoshilabs.trezor.lib.protobuf.TrezorMessageTron.TronSignature
+import com.satoshilabs.trezor.lib.protobuf.TrezorMessageTron.TronTransferContract
+import com.satoshilabs.trezor.lib.protobuf.TrezorMessageTron.TronTriggerSmartContract
 import org.junit.Assert.assertEquals
 import org.junit.Test
 
@@ -111,6 +118,72 @@ class MessageTypeRegistryTest {
         val parsed = MessageTypeRegistry.parse(208, original.toByteArray())
 
         assertEquals(original, parsed)
+    }
+
+    @Test
+    fun typeOf_tronGetAddress_returnsMessageTypeNumberTwentyTwoHundred() {
+        val message = TronGetAddress.newBuilder().build()
+
+        assertEquals(2200, MessageTypeRegistry.typeOf(message))
+    }
+
+    @Test
+    fun parse_tronAddressPayload_returnsEquivalentTronAddressMessage() {
+        val original = TronAddress.newBuilder().setAddress("TTronAddressBase58").build()
+
+        val parsed = MessageTypeRegistry.parse(2201, original.toByteArray())
+
+        assertEquals(original, parsed)
+    }
+
+    @Test
+    fun typeOf_tronSignTx_returnsMessageTypeNumberTwentyTwoHundredTwo() {
+        val message = TronSignTx.newBuilder()
+            .setRefBlockBytes(ByteString.copyFrom(byteArrayOf(1, 2)))
+            .setRefBlockHash(ByteString.copyFrom(byteArrayOf(3)))
+            .setExpiration(1L)
+            .setTimestamp(2L)
+            .build()
+
+        assertEquals(2202, MessageTypeRegistry.typeOf(message))
+    }
+
+    @Test
+    fun parse_tronSignaturePayload_returnsEquivalentTronSignatureMessage() {
+        val original = TronSignature.newBuilder().setSignature(ByteString.copyFrom(ByteArray(65) { 1 })).build()
+
+        val parsed = MessageTypeRegistry.parse(2203, original.toByteArray())
+
+        assertEquals(original, parsed)
+    }
+
+    @Test
+    fun parse_tronContractRequestPayload_returnsTronContractRequestMessage() {
+        val parsed = MessageTypeRegistry.parse(2204, ByteArray(0))
+
+        assertEquals(TronContractRequest.newBuilder().build(), parsed)
+    }
+
+    @Test
+    fun typeOf_tronTransferContract_returnsMessageTypeNumberTwentyTwoHundredFive() {
+        val message = TronTransferContract.newBuilder()
+            .setOwnerAddress(ByteString.copyFrom(byteArrayOf(1)))
+            .setToAddress(ByteString.copyFrom(byteArrayOf(2)))
+            .setAmount(1L)
+            .build()
+
+        assertEquals(2205, MessageTypeRegistry.typeOf(message))
+    }
+
+    @Test
+    fun typeOf_tronTriggerSmartContract_returnsMessageTypeNumberTwentyTwoHundredSix() {
+        val message = TronTriggerSmartContract.newBuilder()
+            .setOwnerAddress(ByteString.copyFrom(byteArrayOf(1)))
+            .setContractAddress(ByteString.copyFrom(byteArrayOf(2)))
+            .setData(ByteString.copyFrom(byteArrayOf(3)))
+            .build()
+
+        assertEquals(2206, MessageTypeRegistry.typeOf(message))
     }
 
     @Test

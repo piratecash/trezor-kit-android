@@ -5,6 +5,7 @@ import cash.p.terminal.trezorkit.TrezorNotInitializedException
 import cash.p.terminal.trezorkit.protocol.TrezorSession
 import cash.p.terminal.trezorkit.protocol.TrezorSessionScope
 import com.google.protobuf.ByteString
+import com.google.protobuf.InvalidProtocolBufferException
 import com.google.protobuf.MessageLite
 import com.satoshilabs.trezor.lib.protobuf.TrezorMessageBitcoin.GetPublicKey
 import com.satoshilabs.trezor.lib.protobuf.TrezorMessageBitcoin.InputScriptType
@@ -48,6 +49,15 @@ import com.satoshilabs.trezor.lib.protobuf.TrezorMessageStellar.StellarPaymentOp
 import com.satoshilabs.trezor.lib.protobuf.TrezorMessageStellar.StellarSignTx
 import com.satoshilabs.trezor.lib.protobuf.TrezorMessageStellar.StellarSignedTx
 import com.satoshilabs.trezor.lib.protobuf.TrezorMessageStellar.StellarTxOpRequest
+import com.satoshilabs.trezor.lib.protobuf.TrezorMessageTron.TronAddress
+import com.satoshilabs.trezor.lib.protobuf.TrezorMessageTron.TronContractRequest
+import com.satoshilabs.trezor.lib.protobuf.TrezorMessageTron.TronGetAddress
+import com.satoshilabs.trezor.lib.protobuf.TrezorMessageTron.TronRawTransaction
+import com.satoshilabs.trezor.lib.protobuf.TrezorMessageTron.TronRawTransaction.TronRawContract
+import com.satoshilabs.trezor.lib.protobuf.TrezorMessageTron.TronSignTx
+import com.satoshilabs.trezor.lib.protobuf.TrezorMessageTron.TronSignature
+import com.satoshilabs.trezor.lib.protobuf.TrezorMessageTron.TronTransferContract
+import com.satoshilabs.trezor.lib.protobuf.TrezorMessageTron.TronTriggerSmartContract
 import java.io.ByteArrayOutputStream
 
 /** [ITrezorClient] backed by a [TrezorSession] talking to a USB-connected Trezor. */
@@ -99,6 +109,7 @@ private class SessionImpl(private val scope: TrezorSessionScope) : TrezorClientS
                 is TrezorPublicKeyRequest.Ethereum -> getEthereumPublicKey(request.path)
                 is TrezorPublicKeyRequest.Solana -> getSolanaPublicKey(request.path)
                 is TrezorPublicKeyRequest.Stellar -> getStellarAddress(request.path)
+                is TrezorPublicKeyRequest.Tron -> getTronAddress(request.path)
             }
         }
 
@@ -127,6 +138,12 @@ private class SessionImpl(private val scope: TrezorSessionScope) : TrezorClientS
     private suspend fun getStellarAddress(path: List<Int>): TrezorKeyResult {
         val request = StellarGetAddress.newBuilder().addAllAddressN(path).build()
         val address = scope.exchangeTyped<StellarAddress>(request).address
+        return TrezorKeyResult(key = address, publicKey = ByteArray(0), chainCode = ByteArray(0))
+    }
+
+    private suspend fun getTronAddress(path: List<Int>): TrezorKeyResult {
+        val request = TronGetAddress.newBuilder().addAllAddressN(path).build()
+        val address = scope.exchangeTyped<TronAddress>(request).address
         return TrezorKeyResult(key = address, publicKey = ByteArray(0), chainCode = ByteArray(0))
     }
 
@@ -219,6 +236,17 @@ private class SessionImpl(private val scope: TrezorSessionScope) : TrezorClientS
         }
         return checkNotNull(signature) { "Device did not return a signature after the last Stellar operation" }.toByteArray()
     }
+
+    override suspend fun signTron(addressN: List<Int>, rawData: ByteArray): ByteArray {
+        // Everything that can reject the transaction happens here, before any Tron message
+        // is sent - only the session-opening Initialize has reached the device by this point.
+        val parsed = parseTronRawTransaction(rawData)
+        val contractMsg = parsed.toCleanContractMessage()
+        requireRepresentable(parsed, contractMsg, rawData)
+
+        scope.exchangeTyped<TronContractRequest>(parsed.toSignTxMessage(addressN))
+        return scope.exchangeTyped<TronSignature>(contractMsg).signature.toByteArray()
+    }
 }
 
 private fun Features.toDto() = TrezorFeatures(
@@ -229,6 +257,7 @@ private fun Features.toDto() = TrezorFeatures(
     passphraseProtection = passphraseProtection,
     // Old firmware without this field does not report it - do not block on its absence.
     initialized = if (hasInitialized()) initialized else true,
+    supportsTron = capabilitiesList.contains(Features.Capability.Capability_Tron),
 )
 
 private fun HDNodeType.toKeyResult(xpub: String) = TrezorKeyResult(
@@ -462,6 +491,99 @@ private fun TrezorStellarOperation.toProto(): MessageLite = when (this) {
         builder.build()
     }
 }
+
+/** Prefix of `google.protobuf.Any.type_url` in Tron transactions, completed with the contract type name. */
+private const val TRON_TYPE_URL_PREFIX = "type.googleapis.com/protocol."
+
+/** Runs a protobuf parse of a Tron [what], converting parse failures into [TrezorException]. */
+private inline fun <T> parsingTron(what: String, block: () -> T): T = try {
+    block()
+} catch (e: InvalidProtocolBufferException) {
+    throw TrezorException("Invalid Tron $what: ${e.message}")
+}
+
+private fun parseTronRawTransaction(rawData: ByteArray): TronRawTransaction =
+    parsingTron("raw transaction") { TronRawTransaction.parseFrom(rawData) }
+
+/**
+ * Extracts the single contract of a Tron transaction as the typed Trezor wire message,
+ * rebuilt from scratch so that unknown fields retained by the protobuf parser are dropped.
+ */
+private fun TronRawTransaction.toCleanContractMessage(): MessageLite {
+    if (contractCount != 1) {
+        throw TrezorException("Tron transaction must contain exactly one contract, got $contractCount")
+    }
+    val parameterValue = getContract(0).parameter.value
+    return when (val type = getContract(0).type) {
+        TronRawContract.TronRawContractType.TransferContract -> {
+            val transfer = parsingTron("TransferContract") { TronTransferContract.parseFrom(parameterValue) }
+            TronTransferContract.newBuilder()
+                .setOwnerAddress(transfer.ownerAddress)
+                .setToAddress(transfer.toAddress)
+                .setAmount(transfer.amount)
+                .build()
+        }
+
+        TronRawContract.TronRawContractType.TriggerSmartContract -> {
+            val trigger = parsingTron("TriggerSmartContract") { TronTriggerSmartContract.parseFrom(parameterValue) }
+            TronTriggerSmartContract.newBuilder()
+                .setOwnerAddress(trigger.ownerAddress)
+                .setContractAddress(trigger.contractAddress)
+                .setData(trigger.data)
+                .build()
+        }
+
+        else -> throw TrezorException("Unsupported Tron contract type $type")
+    }
+}
+
+/**
+ * Fails unless [rawData] is exactly representable by the Trezor Tron protocol.
+ *
+ * The device does not sign the provided bytes - it re-serializes a TronRawTransaction from the
+ * forwarded fields and signs sha256 of its own serialization (firmware apps/tron/sign_tx.py).
+ * Any field the Trezor proto does not know (call_value, ref_block_num, ...) would be silently
+ * dropped, making the device display and sign a DIFFERENT transaction. Rebuilding from only
+ * the forwarded fields and requiring a byte-exact match closes that hole.
+ */
+private fun requireRepresentable(parsed: TronRawTransaction, contractMsg: MessageLite, rawData: ByteArray) {
+    val rebuiltContract = TronRawContract.newBuilder()
+        .setType(parsed.getContract(0).type)
+        .setParameter(
+            TronRawContract.TronRawParameter.newBuilder()
+                .setTypeUrl(TRON_TYPE_URL_PREFIX + parsed.getContract(0).type.name)
+                .setValue(contractMsg.toByteString()),
+        )
+        .build()
+    val rebuilt = TronRawTransaction.newBuilder()
+        .setRefBlockBytes(parsed.refBlockBytes)
+        .setRefBlockHash(parsed.refBlockHash)
+        .setExpiration(parsed.expiration)
+        .addContract(rebuiltContract)
+        .setTimestamp(parsed.timestamp)
+        .apply {
+            if (parsed.hasData()) setData(parsed.data)
+            if (parsed.hasFeeLimit()) setFeeLimit(parsed.feeLimit)
+        }
+        .build()
+    if (!rebuilt.toByteArray().contentEquals(rawData)) {
+        throw TrezorException("Tron transaction contains fields not supported by Trezor")
+    }
+}
+
+/** Builds the [TronSignTx] opener carrying the contract-agnostic fields of the transaction. */
+private fun TronRawTransaction.toSignTxMessage(addressN: List<Int>): TronSignTx =
+    TronSignTx.newBuilder()
+        .addAllAddressN(addressN)
+        .setRefBlockBytes(refBlockBytes)
+        .setRefBlockHash(refBlockHash)
+        .setExpiration(expiration)
+        .setTimestamp(timestamp)
+        .apply {
+            if (this@toSignTxMessage.hasData()) setData(this@toSignTxMessage.data)
+            if (this@toSignTxMessage.hasFeeLimit()) setFeeLimit(this@toSignTxMessage.feeLimit)
+        }
+        .build()
 
 private fun TrezorStellarAsset.toProto(): StellarAsset = when (this) {
     TrezorStellarAsset.Native -> StellarAsset.newBuilder().setType(StellarAssetType.NATIVE).build()

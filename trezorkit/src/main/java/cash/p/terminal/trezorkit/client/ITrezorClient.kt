@@ -37,4 +37,14 @@ interface TrezorClientSession {
 
     /** Signs a Stellar transaction on-device, streaming its operations one by one, and returns the raw signature. */
     suspend fun signStellar(tx: TrezorStellarSignTx): ByteArray
+
+    /**
+     * Signs a Tron transaction on-device and returns the raw 65-byte `r || s || v` signature.
+     *
+     * @param rawData the serialized `raw_data` of the transaction - the exact bytes the
+     *   network will hash. The device re-serializes the transaction itself from the forwarded
+     *   fields, so if [rawData] contains anything the Trezor protocol cannot represent, this
+     *   fails without sending any Tron message to the device.
+     */
+    suspend fun signTron(addressN: List<Int>, rawData: ByteArray): ByteArray
 }
