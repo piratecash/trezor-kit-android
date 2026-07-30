@@ -56,6 +56,7 @@ import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -227,6 +228,7 @@ class UsbTrezorClientTest {
 
     @Test
     fun getFeatures_happyPath_mapsAllFields() = runTest(UnconfinedTestDispatcher()) {
+        val sessionId = byteArrayOf(1, 2, 3, 4)
         val features = Features.newBuilder()
             .setDeviceId("device-1")
             .setModel("T")
@@ -236,12 +238,18 @@ class UsbTrezorClientTest {
             .setPatchVersion(3)
             .setPassphraseProtection(true)
             .setInitialized(true)
+            .setSessionId(ByteString.copyFrom(sessionId))
             .build()
         val client = clientWithResponse(
             MessageType.MessageType_Features_VALUE, features.toByteArray(), UnconfinedTestDispatcher(testScheduler),
         )
 
-        val result = client.connect { getFeatures() }
+        lateinit var sessionHandle: TrezorSessionId
+        val result = client.connect {
+            getFeatures().also {
+                sessionHandle = checkNotNull(it.takeSessionId())
+            }
+        }
 
         assertEquals(
             TrezorFeatures(
@@ -254,6 +262,72 @@ class UsbTrezorClientTest {
             ),
             result,
         )
+        sessionHandle.use {
+            assertArrayEquals(sessionId, it.toByteArray())
+        }
+    }
+
+    @Test
+    fun getFeatures_sessionIdNotTransferred_closesHandleWhenConnectEnds() =
+        runTest(UnconfinedTestDispatcher()) {
+            val features = Features.newBuilder()
+                .setMajorVersion(2)
+                .setMinorVersion(8)
+                .setPatchVersion(10)
+                .setSessionId(ByteString.copyFrom(byteArrayOf(1, 2, 3, 4)))
+                .build()
+            val client = clientWithResponse(
+                MessageType.MessageType_Features_VALUE,
+                features.toByteArray(),
+                UnconfinedTestDispatcher(testScheduler),
+            )
+            lateinit var handle: TrezorSessionId
+
+            client.connect {
+                handle = checkNotNull(getFeatures().sessionId)
+            }
+
+            assertThrows(IllegalStateException::class.java, handle::toByteArray)
+        }
+
+    @Test
+    fun connect_uninitializedFeaturesWithSessionId_closesSessionBeforeThrowing() =
+        runTest(UnconfinedTestDispatcher()) {
+            val features = Features.newBuilder()
+                .setMajorVersion(2)
+                .setMinorVersion(8)
+                .setPatchVersion(10)
+                .setInitialized(false)
+                .setSessionId(ByteString.copyFrom(byteArrayOf(1, 2, 3, 4)))
+                .build()
+            val client = clientWithResponse(
+                MessageType.MessageType_Features_VALUE,
+                features.toByteArray(),
+                UnconfinedTestDispatcher(testScheduler),
+            )
+
+            val error = try {
+                client.connect { getFeatures() }
+                null
+            } catch (error: Throwable) {
+                error
+            }
+
+            assertTrue(error is TrezorNotInitializedException)
+        }
+
+    @Test
+    fun sessionId_mutatingSourceOrReturnedArray_doesNotChangeValue() {
+        val source = byteArrayOf(1, 2, 3)
+        val sessionId = TrezorSessionId(source)
+
+        source[0] = 9
+        val returned = sessionId.toByteArray()
+        returned[1] = 9
+
+        assertArrayEquals(byteArrayOf(1, 2, 3), sessionId.toByteArray())
+        sessionId.close()
+        assertThrows(IllegalStateException::class.java, sessionId::toByteArray)
     }
 
     @Test
@@ -272,6 +346,26 @@ class UsbTrezorClientTest {
         val result = client.connect { getFeatures() }
 
         assertTrue(result.supportsTron)
+    }
+
+    @Test
+    fun getFeatures_deviceReportsMoneroCapability_setsSupportsMonero() = runTest(UnconfinedTestDispatcher()) {
+        val features = Features.newBuilder()
+            .setInternalModel("T3T1")
+            .setMajorVersion(2)
+            .setMinorVersion(8)
+            .setPatchVersion(10)
+            .addCapabilities(Features.Capability.Capability_Monero)
+            .build()
+        val client = clientWithResponse(
+            MessageType.MessageType_Features_VALUE,
+            features.toByteArray(),
+            UnconfinedTestDispatcher(testScheduler),
+        )
+
+        val result = client.connect { getFeatures() }
+
+        assertTrue(result.supportsMonero)
     }
 
     @Test

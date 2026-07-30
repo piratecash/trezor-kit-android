@@ -66,11 +66,15 @@ class UsbTrezorClient(private val session: TrezorSession) : ITrezorClient {
     override suspend fun <T> connect(block: suspend TrezorClientSession.() -> T): T =
         session.withSession {
             val clientSession = SessionImpl(this)
-            // Initialize must be the first message of every session: it resets device state and
-            // establishes the session. Without it the device rejects follow-ups with "Invalid
-            // session" - e.g. scan-to-add fetches keys without first calling getFeatures().
-            clientSession.initialize()
-            clientSession.block()
+            try {
+                // Initialize must be the first message of every session: it resets device state and
+                // establishes the session. Without it the device rejects follow-ups with "Invalid
+                // session" - e.g. scan-to-add fetches keys without first calling getFeatures().
+                clientSession.initialize()
+                clientSession.block()
+            } finally {
+                clientSession.close()
+            }
         }
 }
 
@@ -91,16 +95,21 @@ private class SessionImpl(private val scope: TrezorSessionScope) : TrezorClientS
     /** Sends the mandatory session-opening Initialize and caches the resulting Features. */
     suspend fun initialize() {
         val features = requestFeatures()
+        cachedFeatures = features
         if (!features.initialized) {
             throw TrezorNotInitializedException("Trezor is not set up. Complete setup on the device or in Trezor Suite.")
         }
-        cachedFeatures = features
     }
 
     override suspend fun getFeatures(): TrezorFeatures = cachedFeatures ?: requestFeatures()
 
     private suspend fun requestFeatures(): TrezorFeatures =
         scope.exchangeTyped<Features>(Initialize.newBuilder().build()).toDto()
+
+    fun close() {
+        cachedFeatures?.closeSession()
+        cachedFeatures = null
+    }
 
     override suspend fun getPublicKeys(requests: List<TrezorPublicKeyRequest>): List<TrezorKeyResult> =
         requests.map { request ->
@@ -249,16 +258,29 @@ private class SessionImpl(private val scope: TrezorSessionScope) : TrezorClientS
     }
 }
 
-private fun Features.toDto() = TrezorFeatures(
-    deviceId = if (hasDeviceId()) deviceId else null,
-    model = if (hasModel()) model else null,
-    internalModel = if (hasInternalModel()) internalModel else null,
-    firmwareVersion = "$majorVersion.$minorVersion.$patchVersion",
-    passphraseProtection = passphraseProtection,
-    // Old firmware without this field does not report it - do not block on its absence.
-    initialized = if (hasInitialized()) initialized else true,
-    supportsTron = capabilitiesList.contains(Features.Capability.Capability_Tron),
-)
+private fun Features.toDto() =
+    TrezorFeatures(
+        deviceId = if (hasDeviceId()) deviceId else null,
+        model = if (hasModel()) model else null,
+        internalModel = if (hasInternalModel()) internalModel else null,
+        firmwareVersion = "$majorVersion.$minorVersion.$patchVersion",
+        passphraseProtection = passphraseProtection,
+        // Old firmware without this field does not report it - do not block on its absence.
+        initialized = if (hasInitialized()) initialized else true,
+        supportsTron = capabilitiesList.contains(Features.Capability.Capability_Tron),
+        supportsMonero = capabilitiesList.contains(Features.Capability.Capability_Monero),
+    ).also { features ->
+        features.sessionId = if (hasSessionId() && sessionId.size() > 0) {
+            val bytes = sessionId.toByteArray()
+            try {
+                TrezorSessionId(bytes)
+            } finally {
+                bytes.fill(0)
+            }
+        } else {
+            null
+        }
+    }
 
 private fun HDNodeType.toKeyResult(xpub: String) = TrezorKeyResult(
     key = xpub,

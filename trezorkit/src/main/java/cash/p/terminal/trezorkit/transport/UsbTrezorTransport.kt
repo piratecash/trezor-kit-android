@@ -8,153 +8,206 @@ import android.hardware.usb.UsbInterface
 import android.hardware.usb.UsbManager
 import cash.p.terminal.trezorkit.TrezorException
 import cash.p.terminal.trezorkit.TrezorTransportException
+import cash.p.terminal.trezorkit.TrezorUsbDisconnectedException
+import cash.p.terminal.trezorkit.TrezorUsbInterfaceUnavailableException
+import cash.p.terminal.trezorkit.TrezorUsbOpenFailedException
+import cash.p.terminal.trezorkit.TrezorUsbOperationTimeoutException
+import cash.p.terminal.trezorkit.TrezorUsbPermissionDeniedException
+import cash.p.terminal.trezorkit.TrezorUsbShortPacketException
+import cash.p.terminal.trezorkit.TrezorUsbStaleChannelException
+import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.ensureActive
-import kotlinx.coroutines.withContext
-import timber.log.Timber
+import kotlinx.coroutines.runInterruptible
+import java.util.concurrent.atomic.AtomicReference
 
-/** Thrown by [UsbTrezorTransport.open] when the caller has not been granted USB permission yet. */
-class TrezorUsbPermissionException : TrezorException("USB permission for Trezor device was not granted")
+open class TrezorUsbPermissionException :
+    TrezorException("USB permission for Trezor device was not granted")
 
 /**
- * [ITrezorTransport] implementation over the Android USB Host API for a Trezor device
- * in firmware mode (vendor id [VENDOR_ID], product id [PRODUCT_ID_FIRMWARE]).
- *
- * The caller is responsible for obtaining USB permission for [usbDevice] beforehand
- * (via [UsbManager.requestPermission]) - this class only checks that permission was
- * already granted and fails with [TrezorUsbPermissionException] otherwise.
+ * Android USB transport that also exposes its active connection as a raw packet channel.
  */
-class UsbTrezorTransport(
+class UsbTrezorTransport internal constructor(
     private val usbManager: UsbManager,
     private val usbDevice: UsbDevice,
+    private val dispatcher: CoroutineDispatcher,
 ) : ITrezorTransport {
+    constructor(usbManager: UsbManager, usbDevice: UsbDevice) :
+        this(usbManager, usbDevice, Dispatchers.IO)
 
-    private var connection: UsbDeviceConnection? = null
-    private var usbInterface: UsbInterface? = null
-    private var endpointIn: UsbEndpoint? = null
-    private var endpointOut: UsbEndpoint? = null
+    private val state = AtomicReference<ConnectionState?>()
 
-    override suspend fun open() = withContext(Dispatchers.IO) {
-        if (usbDevice.vendorId != VENDOR_ID || usbDevice.productId != PRODUCT_ID_FIRMWARE) {
+    override suspend fun open() = runInterruptible(dispatcher) {
+        check(state.get() == null) { "Transport is already open" }
+        if (
+            usbDevice.vendorId != VENDOR_ID ||
+            usbDevice.productId != PRODUCT_ID_FIRMWARE
+        ) {
             throw TrezorTransportException(
-                "Not a Trezor device in firmware mode (vendorId=${usbDevice.vendorId}, productId=${usbDevice.productId})"
+                "Not a Trezor device in firmware mode " +
+                    "(vendorId=${usbDevice.vendorId}, productId=${usbDevice.productId})",
             )
         }
         if (!usbManager.hasPermission(usbDevice)) {
-            throw TrezorUsbPermissionException()
+            throw TrezorUsbPermissionDeniedException()
         }
-
-        val selection = selectCommunicationInterface(usbDevice)
-            ?: throw TrezorTransportException("No interface with an IN/OUT endpoint pair found on Trezor device")
-        val conn = usbManager.openDevice(usbDevice)
-            ?: throw TrezorTransportException("Unable to open USB connection to Trezor device")
-        if (!conn.claimInterface(selection.iface, true)) {
-            conn.close()
-            throw TrezorTransportException("Unable to claim USB interface on Trezor device")
+        val selection = selectCommunicationInterface()
+            ?: throw TrezorUsbInterfaceUnavailableException()
+        val connection = usbManager.openDevice(usbDevice)
+            ?: throw TrezorUsbOpenFailedException()
+        try {
+            if (!connection.claimInterface(selection.usbInterface, true)) {
+                throw TrezorUsbInterfaceUnavailableException()
+            }
+            val opened = ConnectionState(
+                connection,
+                selection.usbInterface,
+                selection.endpointIn,
+                selection.endpointOut,
+            )
+            check(state.compareAndSet(null, opened)) { "Transport is already open" }
+        } catch (error: Throwable) {
+            try {
+                connection.close()
+            } catch (cleanupError: RuntimeException) {
+                error.addSuppressed(cleanupError)
+            }
+            throw error
         }
-
-        usbInterface = selection.iface
-        endpointIn = selection.endpointIn
-        endpointOut = selection.endpointOut
-        connection = conn
-        Unit
     }
 
     override fun close() {
-        connection?.let { conn ->
-            usbInterface?.let { conn.releaseInterface(it) }
-            conn.close()
+        val current = state.getAndSet(null) ?: return
+        var failure: Throwable? = null
+        try {
+            current.connection.releaseInterface(current.usbInterface)
+        } catch (error: RuntimeException) {
+            failure = error
         }
-        connection = null
-        usbInterface = null
-        endpointIn = null
-        endpointOut = null
+        try {
+            current.connection.close()
+        } catch (error: RuntimeException) {
+            failure?.addSuppressed(error) ?: run { failure = error }
+        }
+        failure?.let {
+            throw TrezorTransportException("Unable to close Trezor USB connection", it)
+        }
     }
 
-    override suspend fun writePacket(packet: ByteArray) = withContext(Dispatchers.IO) {
+    override suspend fun writePacket(packet: ByteArray) = runInterruptible(dispatcher) {
+        writePacketBlocking(packet)
+    }
+
+    override suspend fun readPacket(): ByteArray = runInterruptible(dispatcher) {
+        readPacketBlocking(Long.MAX_VALUE)
+    }
+
+    internal fun rawChannel(): TrezorRawUsbChannel =
+        object : TrezorRawUsbChannel {
+            override fun writePacket(packet: ByteArray) {
+                writePacketBlocking(packet)
+            }
+
+            override fun readPacket(): ByteArray = readPacketBlocking(Long.MAX_VALUE)
+
+            override fun readPacket(deadlineNanos: Long): ByteArray =
+                readPacketBlocking(deadlineNanos)
+
+            override fun cancel() {
+                close()
+            }
+        }
+
+    private fun writePacketBlocking(packet: ByteArray) {
         require(packet.size == ITrezorTransport.PACKET_SIZE) {
             "Packet must be exactly ${ITrezorTransport.PACKET_SIZE} bytes, got ${packet.size}"
         }
-        val conn = connection ?: throw TrezorTransportException("Transport is not open")
-        val endpoint = endpointOut ?: throw TrezorTransportException("Transport is not open")
-        val written = conn.bulkTransfer(endpoint, packet, packet.size, WRITE_TIMEOUT_MS)
-        if (written != ITrezorTransport.PACKET_SIZE) {
-            throw TrezorTransportException(
-                "USB write failed: wrote $written of ${ITrezorTransport.PACKET_SIZE} bytes"
-            )
+        val current = requireOpen()
+        val written = transfer(current, current.endpointOut, packet, WRITE_TIMEOUT_MS)
+        when {
+            state.get() !== current -> throw TrezorUsbDisconnectedException()
+            written == ITrezorTransport.PACKET_SIZE -> Unit
+            written in 1 until ITrezorTransport.PACKET_SIZE ->
+                throw TrezorUsbShortPacketException("write", written)
+            !isAttached() -> throw TrezorUsbDisconnectedException()
+            written != ITrezorTransport.PACKET_SIZE ->
+                throw TrezorTransportException("Trezor USB write failed")
         }
     }
 
-    /**
-     * Polls for one 64-byte packet. A device that is waiting for a user action (button press,
-     * on-device passphrase entry) may not send anything for a long time - that is not a
-     * transport error, so a timed-out poll simply repeats. [POLL_TIMEOUT_MS] is only the polling
-     * interval; the caller (see `TrezorSession.OPERATION_TIMEOUT_MS`) is responsible for the
-     * user-facing deadline via coroutine cancellation, which [ensureActive] surfaces here.
-     */
-    override suspend fun readPacket(): ByteArray = withContext(Dispatchers.IO) {
-        val conn = connection ?: throw TrezorTransportException("Transport is not open")
-        val endpoint = endpointIn ?: throw TrezorTransportException("Transport is not open")
-        val buffer = ByteArray(ITrezorTransport.PACKET_SIZE)
-        var read = 0
-        while (read != ITrezorTransport.PACKET_SIZE) {
-            read = conn.bulkTransfer(endpoint, buffer, buffer.size, POLL_TIMEOUT_MS)
-            if (read in 1 until ITrezorTransport.PACKET_SIZE) {
-                throw TrezorTransportException(
-                    "USB read failed: read $read of ${ITrezorTransport.PACKET_SIZE} bytes"
-                )
-            }
-            if (read <= 0) {
-                coroutineContext.ensureActive()
+    private fun readPacketBlocking(deadlineNanos: Long): ByteArray {
+        val current = requireOpen()
+        val packet = ByteArray(ITrezorTransport.PACKET_SIZE)
+        while (true) {
+            if (Thread.currentThread().isInterrupted) throw InterruptedException()
+            val read = transfer(current, current.endpointIn, packet, pollTimeout(deadlineNanos))
+            when {
+                state.get() !== current -> throw TrezorUsbDisconnectedException()
+                read == ITrezorTransport.PACKET_SIZE -> return packet
+                read > 0 -> throw TrezorUsbShortPacketException("read", read)
+                read < 0 && !isAttached() -> throw TrezorUsbDisconnectedException()
             }
         }
-        buffer
     }
 
-    /**
-     * Picks the interface Trezor talks its wire protocol over. Trezor Safe devices expose several
-     * interfaces (data channel plus WebUSB/CDC/HID), and not every vendor-class interface carries a
-     * usable endpoint pair, so we scan them all and take the first with both an IN and an OUT
-     * endpoint - preferring the vendor-class interface (the actual data channel) over any fallback.
-     */
-    private fun selectCommunicationInterface(device: UsbDevice): InterfaceSelection? {
+    private fun transfer(
+        current: ConnectionState,
+        endpoint: UsbEndpoint,
+        packet: ByteArray,
+        timeoutMs: Int,
+    ): Int =
+        try {
+            current.connection.bulkTransfer(endpoint, packet, packet.size, timeoutMs)
+        } catch (error: RuntimeException) {
+            if (state.get() !== current || !isAttached()) {
+                throw TrezorUsbDisconnectedException()
+            }
+            throw TrezorTransportException("Trezor USB transfer failed", error)
+        }
+
+    private fun requireOpen(): ConnectionState =
+        state.get() ?: throw TrezorUsbStaleChannelException()
+
+    private fun isAttached(): Boolean =
+        usbManager.deviceList.values.any { it.deviceName == usbDevice.deviceName }
+
+    private fun pollTimeout(deadlineNanos: Long): Int {
+        if (deadlineNanos == Long.MAX_VALUE) return POLL_TIMEOUT_MS
+        val remainingNanos = deadlineNanos - System.nanoTime()
+        if (remainingNanos <= 0) throw TrezorUsbOperationTimeoutException()
+        val remainingMillis =
+            (remainingNanos + NANOS_PER_MILLISECOND - 1) / NANOS_PER_MILLISECOND
+        return remainingMillis.coerceAtMost(POLL_TIMEOUT_MS.toLong()).toInt()
+    }
+
+    private fun selectCommunicationInterface(): InterfaceSelection? {
         var fallback: InterfaceSelection? = null
-        for (index in 0 until device.interfaceCount) {
-            val iface = device.getInterface(index)
-            val endpoints = (0 until iface.endpointCount).map { iface.getEndpoint(it) }
-            logInterface(index, iface, endpoints)
-
-            val epIn = pickEndpoint(endpoints, UsbConstants.USB_DIR_IN) ?: continue
-            val epOut = pickEndpoint(endpoints, UsbConstants.USB_DIR_OUT) ?: continue
-            val selection = InterfaceSelection(iface, epIn, epOut)
-
-            if (iface.interfaceClass == VENDOR_INTERFACE_CLASS) return selection
+        for (index in 0 until usbDevice.interfaceCount) {
+            val usbInterface = usbDevice.getInterface(index)
+            val endpoints = (0 until usbInterface.endpointCount).map(usbInterface::getEndpoint)
+            val endpointIn = endpoints.pickEndpoint(UsbConstants.USB_DIR_IN) ?: continue
+            val endpointOut = endpoints.pickEndpoint(UsbConstants.USB_DIR_OUT) ?: continue
+            val selection = InterfaceSelection(usbInterface, endpointIn, endpointOut)
+            if (usbInterface.interfaceClass == VENDOR_INTERFACE_CLASS) return selection
             if (fallback == null) fallback = selection
         }
         return fallback
     }
 
-    /** Prefers a bulk endpoint but accepts interrupt - Android's [UsbDeviceConnection.bulkTransfer] drives both. */
-    private fun pickEndpoint(endpoints: List<UsbEndpoint>, direction: Int): UsbEndpoint? {
-        val matching = endpoints.filter { it.direction == direction }
+    private fun List<UsbEndpoint>.pickEndpoint(direction: Int): UsbEndpoint? {
+        val matching = filter { it.direction == direction }
         return matching.firstOrNull { it.type == UsbConstants.USB_ENDPOINT_XFER_BULK }
             ?: matching.firstOrNull { it.type == UsbConstants.USB_ENDPOINT_XFER_INT }
     }
 
-    private fun logInterface(index: Int, iface: UsbInterface, endpoints: List<UsbEndpoint>) {
-        Timber.d(
-            "iface[$index] class=0x${iface.interfaceClass.toString(16)} " +
-                "sub=0x${iface.interfaceSubclass.toString(16)} " +
-                "proto=0x${iface.interfaceProtocol.toString(16)} endpoints=${iface.endpointCount}"
-        )
-        endpoints.forEach { ep ->
-            val dir = if (ep.direction == UsbConstants.USB_DIR_IN) "IN" else "OUT"
-            Timber.d("  ep addr=0x${ep.address.toString(16)} type=${ep.type} dir=$dir")
-        }
-    }
+    private data class ConnectionState(
+        val connection: UsbDeviceConnection,
+        val usbInterface: UsbInterface,
+        val endpointIn: UsbEndpoint,
+        val endpointOut: UsbEndpoint,
+    )
 
     private data class InterfaceSelection(
-        val iface: UsbInterface,
+        val usbInterface: UsbInterface,
         val endpointIn: UsbEndpoint,
         val endpointOut: UsbEndpoint,
     )
@@ -165,6 +218,7 @@ class UsbTrezorTransport(
         const val PRODUCT_ID_BOOTLOADER = 0x53C0
         private const val VENDOR_INTERFACE_CLASS = 0xFF
         private const val WRITE_TIMEOUT_MS = 5_000
-        private const val POLL_TIMEOUT_MS = 5_000
+        private const val POLL_TIMEOUT_MS = 1_000
+        private const val NANOS_PER_MILLISECOND = 1_000_000L
     }
 }

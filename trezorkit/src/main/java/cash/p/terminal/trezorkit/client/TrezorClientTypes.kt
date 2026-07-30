@@ -6,8 +6,9 @@ package cash.p.terminal.trezorkit.client
  * [firmwareVersion] is assembled as `"major.minor.patch"`.
  * [supportsTron] reflects the device's `Capability_Tron` (Tron signing landed in core firmware 2.11.0);
  * older firmware rejects Tron messages, so callers must not request Tron derivation when it is false.
+ * [supportsMonero] reflects the independent `Capability_Monero` firmware predicate.
  */
-data class TrezorFeatures(
+data class TrezorFeatures @JvmOverloads constructor(
     val deviceId: String?,
     val model: String?,
     val internalModel: String?,
@@ -15,7 +16,54 @@ data class TrezorFeatures(
     val passphraseProtection: Boolean,
     val initialized: Boolean = true,
     val supportsTron: Boolean = false,
-)
+    val supportsMonero: Boolean = false,
+) {
+
+    /**
+     * Lets a different protocol client resume this exact unlocked device session.
+     * Ownership remains with the client session until [takeSessionId] transfers it.
+     */
+    var sessionId: TrezorSessionId? = null
+        internal set
+
+    /**
+     * Transfers ownership of the resumable session ID to another protocol client.
+     * The caller must close the returned handle immediately after copying it.
+     */
+    @Synchronized
+    fun takeSessionId(): TrezorSessionId? =
+        sessionId.also { sessionId = null }
+
+    @Synchronized
+    internal fun closeSession() {
+        sessionId?.close()
+        sessionId = null
+    }
+}
+
+/** Protobuf-free, explicitly destroyable Trezor session identifier. */
+class TrezorSessionId(value: ByteArray) : AutoCloseable {
+    private val bytes = value.copyOf()
+    private var closed = false
+
+    init {
+        require(bytes.isNotEmpty()) { "Trezor session ID must not be empty" }
+    }
+
+    @Synchronized
+    fun toByteArray(): ByteArray {
+        check(!closed) { "Trezor session ID is closed" }
+        return bytes.copyOf()
+    }
+
+    override fun toString(): String = "TrezorSessionId([redacted])"
+
+    @Synchronized
+    override fun close() {
+        bytes.fill(0)
+        closed = true
+    }
+}
 
 /** One key/address derivation request, batched together in a single [TrezorClientSession.getPublicKeys] call. */
 sealed interface TrezorPublicKeyRequest {
