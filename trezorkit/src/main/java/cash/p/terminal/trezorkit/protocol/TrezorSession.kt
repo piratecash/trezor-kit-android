@@ -32,6 +32,9 @@ sealed class TrezorSessionEvent {
 /** Receiver for the [TrezorSession.withSession] block. The session lock is already held. */
 interface TrezorSessionScope {
     suspend fun exchange(message: MessageLite): MessageLite
+
+    /** Receives the next final response without sending another request. */
+    suspend fun receive(): MessageLite
 }
 
 /**
@@ -54,6 +57,8 @@ class TrezorSession(
 
     private val sessionScope = object : TrezorSessionScope {
         override suspend fun exchange(message: MessageLite): MessageLite = exchangeInternal(message)
+
+        override suspend fun receive(): MessageLite = receiveInternal()
     }
 
     /**
@@ -85,6 +90,14 @@ class TrezorSession(
                     send(message)
                     readResponse()
                 }
+            }
+        }
+
+    /** Receives one final response while retaining the normal prompt and timeout handling. */
+    private suspend fun receiveInternal(): MessageLite =
+        mapTimeoutToTransportException {
+            withTimeout(OPERATION_TIMEOUT_MS) {
+                withContext(dispatcher) { readResponse() }
             }
         }
 

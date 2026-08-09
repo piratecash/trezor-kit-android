@@ -78,13 +78,6 @@ class UsbTrezorClient(private val session: TrezorSession) : ITrezorClient {
         }
 }
 
-/** Asks [message] on this session scope and casts the response to [T], the only expected reply type. */
-private suspend inline fun <reified T : MessageLite> TrezorSessionScope.exchangeTyped(message: MessageLite): T {
-    val response = exchange(message)
-    return response as? T
-        ?: throw TrezorException("Expected ${T::class.simpleName} but got ${response::class.simpleName}")
-}
-
 /** Trezor requests transaction payload data in chunks of at most this many bytes. */
 private const val ETHEREUM_DATA_CHUNK_SIZE = 1024
 
@@ -104,7 +97,31 @@ private class SessionImpl(private val scope: TrezorSessionScope) : TrezorClientS
     override suspend fun getFeatures(): TrezorFeatures = cachedFeatures ?: requestFeatures()
 
     private suspend fun requestFeatures(): TrezorFeatures =
-        scope.exchangeTyped<Features>(Initialize.newBuilder().build()).toDto()
+        scope.exchange(Initialize.newBuilder().build()).let { response ->
+            response as? Features
+                ?: throw TrezorException("Expected Features but got ${response::class.simpleName}")
+        }.toDto()
+
+    /**
+     * Consumes device-initiated Features updates before the response to [message], retaining the
+     * newest session details without retransmitting [message].
+     */
+    private suspend fun exchange(message: MessageLite): MessageLite {
+        var response = scope.exchange(message)
+        while (response is Features) {
+            cachedFeatures?.closeSession()
+            cachedFeatures = response.toDto()
+            response = scope.receive()
+        }
+        return response
+    }
+
+    /** Asks [message] and casts its response to [T], the only expected reply type. */
+    private suspend inline fun <reified T : MessageLite> exchangeTyped(message: MessageLite): T {
+        val response = exchange(message)
+        return response as? T
+            ?: throw TrezorException("Expected ${T::class.simpleName} but got ${response::class.simpleName}")
+    }
 
     fun close() {
         cachedFeatures?.closeSession()
@@ -128,37 +145,37 @@ private class SessionImpl(private val scope: TrezorSessionScope) : TrezorClientS
             .setCoinName(coinName)
             .setScriptType(scriptType.toProto())
             .build()
-        val response = scope.exchangeTyped<PublicKey>(request)
+        val response = exchangeTyped<PublicKey>(request)
         return response.node.toKeyResult(response.xpub)
     }
 
     private suspend fun getEthereumPublicKey(path: List<Int>): TrezorKeyResult {
         val request = EthereumGetPublicKey.newBuilder().addAllAddressN(path).build()
-        val response = scope.exchangeTyped<EthereumPublicKey>(request)
+        val response = exchangeTyped<EthereumPublicKey>(request)
         return response.node.toKeyResult(response.xpub)
     }
 
     private suspend fun getSolanaPublicKey(path: List<Int>): TrezorKeyResult {
         val request = SolanaGetPublicKey.newBuilder().addAllAddressN(path).build()
-        val publicKey = scope.exchangeTyped<SolanaPublicKey>(request).publicKey.toByteArray()
+        val publicKey = exchangeTyped<SolanaPublicKey>(request).publicKey.toByteArray()
         return TrezorKeyResult(key = publicKey.toHex(), publicKey = publicKey, chainCode = ByteArray(0))
     }
 
     private suspend fun getStellarAddress(path: List<Int>): TrezorKeyResult {
         val request = StellarGetAddress.newBuilder().addAllAddressN(path).build()
-        val address = scope.exchangeTyped<StellarAddress>(request).address
+        val address = exchangeTyped<StellarAddress>(request).address
         return TrezorKeyResult(key = address, publicKey = ByteArray(0), chainCode = ByteArray(0))
     }
 
     private suspend fun getTronAddress(path: List<Int>): TrezorKeyResult {
         val request = TronGetAddress.newBuilder().addAllAddressN(path).build()
-        val address = scope.exchangeTyped<TronAddress>(request).address
+        val address = exchangeTyped<TronAddress>(request).address
         return TrezorKeyResult(key = address, publicKey = ByteArray(0), chainCode = ByteArray(0))
     }
 
     override suspend fun signEthereum(tx: TrezorEvmTx): TrezorSignature {
         val initialChunk = tx.data.copyOf(minOf(tx.data.size, ETHEREUM_DATA_CHUNK_SIZE))
-        var response = scope.exchangeTyped<EthereumTxRequest>(tx.toSignTxMessage(initialChunk))
+        var response = exchangeTyped<EthereumTxRequest>(tx.toSignTxMessage(initialChunk))
         var sentBytes = initialChunk.size
 
         while (response.hasDataLength()) {
@@ -171,7 +188,7 @@ private class SessionImpl(private val scope: TrezorSessionScope) : TrezorClientS
             val chunk = tx.data.copyOfRange(sentBytes, sentBytes + response.dataLength)
             sentBytes += chunk.size
             val ack = EthereumTxAck.newBuilder().setDataChunk(ByteString.copyFrom(chunk)).build()
-            response = scope.exchangeTyped<EthereumTxRequest>(ack)
+            response = exchangeTyped<EthereumTxRequest>(ack)
         }
         if (sentBytes != tx.data.size) {
             throw TrezorException("Device ended the Ethereum sign flow after $sentBytes of ${tx.data.size} data bytes")
@@ -188,7 +205,7 @@ private class SessionImpl(private val scope: TrezorSessionScope) : TrezorClientS
             .addAllAddressN(addressN)
             .setMessage(ByteString.copyFrom(message))
             .build()
-        val response = scope.exchangeTyped<EthereumMessageSignature>(request)
+        val response = exchangeTyped<EthereumMessageSignature>(request)
         return TrezorMessageSignature(
             signature = response.signature.toByteArray(),
             address = response.address,
@@ -208,14 +225,14 @@ private class SessionImpl(private val scope: TrezorSessionScope) : TrezorClientS
             .setLockTime(tx.lockTime.toInt())
             .build()
 
-        var response = scope.exchangeTyped<TxRequest>(signTx)
+        var response = exchangeTyped<TxRequest>(signTx)
         val signatures = arrayOfNulls<ByteArray>(tx.inputs.size)
         val buffer = ByteArrayOutputStream()
 
         while (true) {
             if (response.hasSerialized()) response.serialized.collectInto(signatures, buffer)
             if (response.requestType == RequestType.TXFINISHED) break
-            response = scope.exchangeTyped<TxRequest>(response.buildAck(tx, prevTxByHash))
+            response = exchangeTyped<TxRequest>(response.buildAck(tx, prevTxByHash))
         }
 
         return TrezorBtcSignResult(
@@ -229,15 +246,15 @@ private class SessionImpl(private val scope: TrezorSessionScope) : TrezorClientS
             .addAllAddressN(addressN)
             .setSerializedTx(ByteString.copyFrom(serializedTx))
             .build()
-        return scope.exchangeTyped<SolanaTxSignature>(request).signature.toByteArray()
+        return exchangeTyped<SolanaTxSignature>(request).signature.toByteArray()
     }
 
     override suspend fun signStellar(tx: TrezorStellarSignTx): ByteArray {
-        scope.exchangeTyped<StellarTxOpRequest>(tx.toSignTxProto())
+        exchangeTyped<StellarTxOpRequest>(tx.toSignTxProto())
 
         var signature: ByteString? = null
         for (operation in tx.operations) {
-            when (val ack = scope.exchange(operation.toProto())) {
+            when (val ack = exchange(operation.toProto())) {
                 is StellarSignedTx -> signature = ack.signature
                 is StellarTxOpRequest -> Unit
                 else -> throw TrezorException("Unexpected response ${ack::class.simpleName} for Stellar operation")
@@ -253,8 +270,8 @@ private class SessionImpl(private val scope: TrezorSessionScope) : TrezorClientS
         val contractMsg = parsed.toCleanContractMessage()
         requireRepresentable(parsed, contractMsg, rawData)
 
-        scope.exchangeTyped<TronContractRequest>(parsed.toSignTxMessage(addressN))
-        return scope.exchangeTyped<TronSignature>(contractMsg).signature.toByteArray()
+        exchangeTyped<TronContractRequest>(parsed.toSignTxMessage(addressN))
+        return exchangeTyped<TronSignature>(contractMsg).signature.toByteArray()
     }
 }
 

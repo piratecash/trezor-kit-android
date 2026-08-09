@@ -465,6 +465,76 @@ class UsbTrezorClientTest {
     }
 
     @Test
+    fun getPublicKeys_featuresBeforePublicKey_recoversWithoutResendingAndRetainsNewestFeaturesSession() =
+        runTest(UnconfinedTestDispatcher()) {
+            val newestSessionId = byteArrayOf(9, 8, 7, 6)
+            val extraFeatures = Features.newBuilder()
+                .setMajorVersion(2)
+                .setMinorVersion(8)
+                .setPatchVersion(10)
+                .setInitialized(true)
+                .setSessionId(ByteString.copyFrom(newestSessionId))
+                .addCapabilities(Features.Capability.Capability_Monero)
+                .build()
+            val staleFeatures = extraFeatures.toBuilder()
+                .setSessionId(ByteString.copyFrom(byteArrayOf(1)))
+                .build()
+            val (client, transport) = clientWithRawResponses(
+                UnconfinedTestDispatcher(testScheduler),
+                sessionFeaturesResponse(),
+                MessageType.MessageType_Features_VALUE to staleFeatures.toByteArray(),
+                MessageType.MessageType_Features_VALUE to extraFeatures.toByteArray(),
+                MessageType.MessageType_PublicKey_VALUE to bitcoinPublicKeyResponse("xpub-recovered"),
+            )
+
+            lateinit var recoveredSessionId: TrezorSessionId
+            val (keys, recoveredFeatures) = client.connect {
+                val keys = getPublicKeys(
+                    listOf(TrezorPublicKeyRequest.Bitcoin("Bitcoin", listOf(44, 0, 0), TrezorInputScriptType.SPENDADDRESS)),
+                )
+                val features = getFeatures()
+                recoveredSessionId = checkNotNull(features.takeSessionId())
+                keys to features
+            }
+
+            assertEquals("xpub-recovered", keys.single().key)
+            assertEquals("2.8.10", recoveredFeatures.firmwareVersion)
+            assertTrue(recoveredFeatures.supportsMonero)
+            recoveredSessionId.use { assertArrayEquals(newestSessionId, it.toByteArray()) }
+            assertEquals(
+                listOf(MessageType.MessageType_Initialize_VALUE, MessageType.MessageType_GetPublicKey_VALUE),
+                transport.writtenPackets.decodeMessages().map { it.msgType },
+            )
+        }
+
+    @Test
+    fun getPublicKeys_featuresBeforeUnrelatedResponse_throwsProtocolMismatch() = runTest(UnconfinedTestDispatcher()) {
+        val (client, transport) = clientWithRawResponses(
+            UnconfinedTestDispatcher(testScheduler),
+            sessionFeaturesResponse(),
+            sessionFeaturesResponse(),
+            MessageType.MessageType_EthereumTxRequest_VALUE to EthereumTxRequest.newBuilder().build().toByteArray(),
+        )
+
+        val error = try {
+            client.connect {
+                getPublicKeys(
+                    listOf(TrezorPublicKeyRequest.Bitcoin("Bitcoin", listOf(44, 0, 0), TrezorInputScriptType.SPENDADDRESS)),
+                )
+            }
+            error("Expected a protocol mismatch")
+        } catch (e: TrezorException) {
+            e
+        }
+
+        assertEquals("Expected PublicKey but got EthereumTxRequest", error.message)
+        assertEquals(
+            listOf(MessageType.MessageType_Initialize_VALUE, MessageType.MessageType_GetPublicKey_VALUE),
+            transport.writtenPackets.decodeMessages().map { it.msgType },
+        )
+    }
+
+    @Test
     fun getPublicKeys_bitcoinEachScriptType_sendsRequestedScriptTypeInGetPublicKey() = runTest(UnconfinedTestDispatcher()) {
         val scriptTypes = TrezorInputScriptType.entries
         val (client, transport) = clientWithResponses(
