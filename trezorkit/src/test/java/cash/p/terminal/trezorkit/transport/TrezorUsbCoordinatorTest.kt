@@ -30,6 +30,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.yield
+import kotlinx.coroutines.sync.Mutex
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertSame
@@ -215,6 +216,28 @@ class TrezorUsbCoordinatorTest {
 
         releaseFirst.complete(Unit)
         first.await()
+    }
+
+    @Test
+    fun acquireMutex_cancelledAfterLockAcquired_releasesMutex() = runTest {
+        val mutex = Mutex()
+        val lockAcquired = CompletableDeferred<Unit>()
+        val completeHandoff = CompletableDeferred<Unit>()
+        val waiter = async {
+            acquireTrezorUsbMutex(mutex, ACQUIRE_TIMEOUT_MS) {
+                lockAcquired.complete(Unit)
+                completeHandoff.await()
+            }
+        }
+
+        lockAcquired.await()
+        waiter.cancelAndJoin()
+
+        assertTrue(waiter.isCancelled)
+        withTimeout(ACQUIRE_TIMEOUT_MS) {
+            mutex.lock()
+            mutex.unlock()
+        }
     }
 
     @Test

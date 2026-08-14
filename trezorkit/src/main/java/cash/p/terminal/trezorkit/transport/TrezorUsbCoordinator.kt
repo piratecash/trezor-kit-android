@@ -66,9 +66,7 @@ class TrezorUsbCoordinator(
     }
 
     private suspend fun <T> withDevice(block: suspend (UsbDevice) -> T): T {
-        withTimeoutOrNull(acquireTimeoutMs) {
-            mutex.lock()
-        } ?: throw TrezorUsbAcquireTimeoutException()
+        acquireTrezorUsbMutex(mutex, acquireTimeoutMs)
         try {
             val device = findDevice()
             ensurePermission(device)
@@ -109,5 +107,26 @@ class TrezorUsbCoordinator(
 
     companion object {
         const val DEFAULT_ACQUIRE_TIMEOUT_MS = 60_000L
+    }
+}
+
+internal suspend fun acquireTrezorUsbMutex(
+    mutex: Mutex,
+    acquireTimeoutMs: Long,
+    afterLockAcquired: suspend () -> Unit = {},
+) {
+    var lockAcquired = false
+    var handoffComplete = false
+    try {
+        withTimeoutOrNull(acquireTimeoutMs) {
+            mutex.lock()
+            lockAcquired = true
+            afterLockAcquired()
+        } ?: throw TrezorUsbAcquireTimeoutException()
+        handoffComplete = true
+    } finally {
+        if (lockAcquired && !handoffComplete) {
+            mutex.unlock()
+        }
     }
 }
