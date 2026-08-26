@@ -69,6 +69,13 @@ import org.junit.Test
 @OptIn(ExperimentalCoroutinesApi::class)
 class UsbTrezorClientTest {
 
+    @Test
+    fun constructor_singleSessionParameter_remainsJvmCompatible() {
+        val constructor = UsbTrezorClient::class.java.getConstructor(TrezorSession::class.java)
+
+        assertEquals(1, constructor.parameterCount)
+    }
+
     // The dispatcher must share the calling test's own scheduler (see [TrezorSessionTest]) -
     // an unrelated TestDispatcher would run on a disconnected virtual clock and never complete.
     // getFeatures test: no prepended Initialize response - its Features answer feeds the session's

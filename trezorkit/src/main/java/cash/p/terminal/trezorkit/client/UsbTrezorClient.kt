@@ -65,7 +65,7 @@ import kotlinx.coroutines.CancellationException
 import java.io.ByteArrayOutputStream
 
 /** [ITrezorClient] backed by a [TrezorSession] talking to a USB-connected Trezor. */
-class UsbTrezorClient(
+class UsbTrezorClient @JvmOverloads constructor(
     private val session: TrezorSession,
     private val ethereumDefinitionsProvider: TrezorEthereumDefinitionsProvider? = null,
 ) : ITrezorClient {
