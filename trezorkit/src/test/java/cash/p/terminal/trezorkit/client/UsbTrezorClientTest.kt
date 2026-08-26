@@ -23,9 +23,13 @@ import com.satoshilabs.trezor.lib.protobuf.TrezorMessageBitcoin.TxRequest
 import com.satoshilabs.trezor.lib.protobuf.TrezorMessageBitcoin.TxRequest.RequestType
 import com.satoshilabs.trezor.lib.protobuf.TrezorMessageCommon.ButtonRequest
 import com.satoshilabs.trezor.lib.protobuf.TrezorMessageCommon.HDNodeType
+import com.satoshilabs.trezor.lib.protobuf.TrezorMessageEthereum.EthereumDefinitionAck
+import com.satoshilabs.trezor.lib.protobuf.TrezorMessageEthereum.EthereumDefinitionRequest
 import com.satoshilabs.trezor.lib.protobuf.TrezorMessageEthereum.EthereumMessageSignature
 import com.satoshilabs.trezor.lib.protobuf.TrezorMessageEthereum.EthereumPublicKey
 import com.satoshilabs.trezor.lib.protobuf.TrezorMessageEthereum.EthereumSignMessage
+import com.satoshilabs.trezor.lib.protobuf.TrezorMessageEthereum.EthereumSignTx
+import com.satoshilabs.trezor.lib.protobuf.TrezorMessageEthereum.EthereumSignTxEIP1559
 import com.satoshilabs.trezor.lib.protobuf.TrezorMessageEthereum.EthereumTxAck
 import com.satoshilabs.trezor.lib.protobuf.TrezorMessageEthereum.EthereumTxRequest
 import com.satoshilabs.trezor.lib.protobuf.TrezorMessageManagement.Features
@@ -50,12 +54,14 @@ import com.satoshilabs.trezor.lib.protobuf.TrezorMessageTron.TronSignTx
 import com.satoshilabs.trezor.lib.protobuf.TrezorMessageTron.TronSignature
 import com.satoshilabs.trezor.lib.protobuf.TrezorMessageTron.TronTransferContract
 import com.satoshilabs.trezor.lib.protobuf.TrezorMessageTron.TronTriggerSmartContract
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -78,16 +84,30 @@ class UsbTrezorClientTest {
         dispatcher: CoroutineDispatcher,
         vararg messages: Pair<Int, ByteArray>,
     ): Pair<UsbTrezorClient, FakeTrezorTransport> =
-        clientWithRawResponses(dispatcher, sessionFeaturesResponse(), *messages)
+        clientWithProviderResponses(dispatcher, null, *messages)
+
+    private fun clientWithProviderResponses(
+        dispatcher: CoroutineDispatcher,
+        provider: TrezorEthereumDefinitionsProvider?,
+        vararg messages: Pair<Int, ByteArray>,
+    ): Pair<UsbTrezorClient, FakeTrezorTransport> =
+        clientWithRawResponses(dispatcher, provider, sessionFeaturesResponse(), *messages)
 
     private fun clientWithRawResponses(
         dispatcher: CoroutineDispatcher,
+        vararg messages: Pair<Int, ByteArray>,
+    ): Pair<UsbTrezorClient, FakeTrezorTransport> =
+        clientWithRawResponses(dispatcher, null, *messages)
+
+    private fun clientWithRawResponses(
+        dispatcher: CoroutineDispatcher,
+        provider: TrezorEthereumDefinitionsProvider?,
         vararg messages: Pair<Int, ByteArray>,
     ): Pair<UsbTrezorClient, FakeTrezorTransport> {
         val responses = messages.flatMap { (msgType, payload) -> FramingCodec.encode(msgType, payload) }
         val transport = FakeTrezorTransport(responses)
         val session = TrezorSession(transport, MessageTypeRegistry, dispatcher)
-        return UsbTrezorClient(session) to transport
+        return UsbTrezorClient(session, provider) to transport
     }
 
     private fun sessionFeaturesResponse(): Pair<Int, ByteArray> =
@@ -575,6 +595,8 @@ class UsbTrezorClientTest {
         assertEquals(TrezorSignature(v = 27, r = r, s = s, serializedTx = expectedSerializedTx), result)
         val sentTypes = transport.sentMessagesAfterInit().map { it.msgType }
         assertEquals(listOf(MessageType.MessageType_EthereumSignTx_VALUE), sentTypes)
+        val signRequest = EthereumSignTx.parseFrom(transport.sentMessagesAfterInit().single().payload)
+        assertFalse(signRequest.hasSupportsDefinitionRequest())
     }
 
     @Test
@@ -608,6 +630,124 @@ class UsbTrezorClientTest {
         assertEquals(TrezorSignature(v = 28, r = r, s = s, serializedTx = expectedSerializedTx), result)
         val sentTypes = transport.sentMessagesAfterInit().map { it.msgType }
         assertEquals(listOf(MessageType.MessageType_EthereumSignTxEIP1559_VALUE), sentTypes)
+        val signRequest = EthereumSignTxEIP1559.parseFrom(transport.sentMessagesAfterInit().single().payload)
+        assertFalse(signRequest.hasSupportsDefinitionRequest())
+    }
+
+    @Test
+    fun signEthereum_eip1559WithProvider_advertisesDefinitionRequests() = runTest(UnconfinedTestDispatcher()) {
+        val (client, transport) = clientWithProviderResponses(
+            UnconfinedTestDispatcher(testScheduler),
+            TrezorEthereumDefinitionsProvider { TrezorEthereumDefinitions() },
+            MessageType.MessageType_EthereumTxRequest_VALUE to signatureResponse(1, ByteArray(32) { 3 }, ByteArray(32) { 4 }),
+        )
+
+        client.connect { signEthereum(eip1559Tx()) }
+
+        val signRequest = EthereumSignTxEIP1559.parseFrom(transport.sentMessagesAfterInit().single().payload)
+        assertTrue(signRequest.hasSupportsDefinitionRequest())
+        assertTrue(signRequest.supportsDefinitionRequest)
+    }
+
+    @Test
+    fun signEthereum_definitionRequestBetweenDataChunks_preservesOffsetAndReturnsPartialDefinitions() =
+        runTest(UnconfinedTestDispatcher()) {
+            val data = ByteArray(2500) { (it % 256).toByte() }
+            val contract = ByteArray(20) { 0xab.toByte() }
+            val selector = byteArrayOf(0xa9.toByte(), 0x05, 0x9c.toByte(), 0xbb.toByte())
+            val definitionRequest = EthereumDefinitionRequest.newBuilder()
+                .setChainId(4663)
+                .setTokenAddress(ByteString.copyFrom(contract))
+                .setFuncSig(ByteString.copyFrom(selector))
+                .build()
+            var providerRequest: TrezorEthereumDefinitionRequest? = null
+            val provider = TrezorEthereumDefinitionsProvider { request ->
+                providerRequest = request
+                TrezorEthereumDefinitions(
+                    encodedNetwork = byteArrayOf(1, 2),
+                    encodedToken = byteArrayOf(3, 4),
+                )
+            }
+            val (client, transport) = clientWithProviderResponses(
+                UnconfinedTestDispatcher(testScheduler),
+                provider,
+                MessageType.MessageType_EthereumTxRequest_VALUE to
+                    EthereumTxRequest.newBuilder().setDataLength(1024).build().toByteArray(),
+                MessageType.MessageType_EthereumDefinitionRequest_VALUE to definitionRequest.toByteArray(),
+                MessageType.MessageType_EthereumTxRequest_VALUE to
+                    EthereumTxRequest.newBuilder().setDataLength(452).build().toByteArray(),
+                MessageType.MessageType_EthereumTxRequest_VALUE to
+                    signatureResponse(28, ByteArray(32) { 5 }, ByteArray(32) { 6 }),
+            )
+
+            client.connect { signEthereum(legacyTx(data)) }
+
+            assertEquals(
+                TrezorEthereumDefinitionRequest(
+                    chainId = 4663,
+                    contractAddress = "ab".repeat(20),
+                    functionSignature = "a9059cbb",
+                ),
+                providerRequest,
+            )
+            val sentMessages = transport.sentMessagesAfterInit()
+            assertEquals(
+                listOf(
+                    MessageType.MessageType_EthereumSignTx_VALUE,
+                    MessageType.MessageType_EthereumTxAck_VALUE,
+                    MessageType.MessageType_EthereumDefinitionAck_VALUE,
+                    MessageType.MessageType_EthereumTxAck_VALUE,
+                ),
+                sentMessages.map { it.msgType },
+            )
+            assertArrayEquals(data.copyOfRange(1024, 2048), EthereumTxAck.parseFrom(sentMessages[1].payload).dataChunk.toByteArray())
+            assertArrayEquals(data.copyOfRange(2048, 2500), EthereumTxAck.parseFrom(sentMessages[3].payload).dataChunk.toByteArray())
+            val definitions = EthereumDefinitionAck.parseFrom(sentMessages[2].payload).definitions
+            assertArrayEquals(byteArrayOf(1, 2), definitions.encodedNetwork.toByteArray())
+            assertArrayEquals(byteArrayOf(3, 4), definitions.encodedToken.toByteArray())
+            assertFalse(definitions.hasEncodedDisplayFormat())
+        }
+
+    @Test
+    fun signEthereum_providerFailure_sendsEmptyAckAndContinues() = runTest(UnconfinedTestDispatcher()) {
+        val request = EthereumDefinitionRequest.newBuilder()
+            .setChainId(4663)
+            .setTokenAddress(ByteString.EMPTY)
+            .build()
+        val (client, transport) = clientWithProviderResponses(
+            UnconfinedTestDispatcher(testScheduler),
+            TrezorEthereumDefinitionsProvider { throw IllegalStateException("offline") },
+            MessageType.MessageType_EthereumDefinitionRequest_VALUE to request.toByteArray(),
+            MessageType.MessageType_EthereumTxRequest_VALUE to
+                signatureResponse(27, ByteArray(32) { 1 }, ByteArray(32) { 2 }),
+        )
+
+        client.connect { signEthereum(legacyTx()) }
+
+        val ack = EthereumDefinitionAck.parseFrom(transport.sentMessagesAfterInit()[1].payload)
+        assertFalse(ack.hasDefinitions())
+    }
+
+    @Test
+    fun signEthereum_providerCancellation_propagates() = runTest(UnconfinedTestDispatcher()) {
+        val request = EthereumDefinitionRequest.newBuilder()
+            .setChainId(4663)
+            .setTokenAddress(ByteString.EMPTY)
+            .build()
+        val (client, _) = clientWithProviderResponses(
+            UnconfinedTestDispatcher(testScheduler),
+            TrezorEthereumDefinitionsProvider { throw CancellationException("cancelled") },
+            MessageType.MessageType_EthereumDefinitionRequest_VALUE to request.toByteArray(),
+        )
+
+        var caught: CancellationException? = null
+        try {
+            client.connect { signEthereum(legacyTx()) }
+        } catch (e: CancellationException) {
+            caught = e
+        }
+
+        assertTrue(caught != null)
     }
 
     @Test

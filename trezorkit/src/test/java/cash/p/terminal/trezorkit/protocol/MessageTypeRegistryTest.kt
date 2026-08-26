@@ -5,6 +5,8 @@ import com.satoshilabs.trezor.lib.protobuf.TrezorMessageBitcoin.GetPublicKey
 import com.satoshilabs.trezor.lib.protobuf.TrezorMessageBitcoin.PublicKey
 import com.satoshilabs.trezor.lib.protobuf.TrezorMessageCommon.Failure
 import com.satoshilabs.trezor.lib.protobuf.TrezorMessageCommon.HDNodeType
+import com.satoshilabs.trezor.lib.protobuf.TrezorMessageEthereum.EthereumDefinitionAck
+import com.satoshilabs.trezor.lib.protobuf.TrezorMessageEthereum.EthereumDefinitionRequest
 import com.satoshilabs.trezor.lib.protobuf.TrezorMessageEthereum.EthereumGetPublicKey
 import com.satoshilabs.trezor.lib.protobuf.TrezorMessageEthereum.EthereumMessageSignature
 import com.satoshilabs.trezor.lib.protobuf.TrezorMessageEthereum.EthereumSignMessage
@@ -95,6 +97,23 @@ class MessageTypeRegistryTest {
         val message = EthereumGetPublicKey.newBuilder().build()
 
         assertEquals(450, MessageTypeRegistry.typeOf(message))
+    }
+
+    @Test
+    fun parse_ethereumDefinitionRequest_returnsEquivalentMessage() {
+        val original = EthereumDefinitionRequest.newBuilder()
+            .setChainId(4663)
+            .setTokenAddress(ByteString.copyFrom(ByteArray(20) { 1 }))
+            .build()
+
+        val parsed = MessageTypeRegistry.parse(471, original.toByteArray())
+
+        assertEquals(original, parsed)
+    }
+
+    @Test
+    fun typeOf_ethereumDefinitionAck_returnsMessageTypeNumberFourHundredSeventyTwo() {
+        assertEquals(472, MessageTypeRegistry.typeOf(EthereumDefinitionAck.newBuilder().build()))
     }
 
     @Test

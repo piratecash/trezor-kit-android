@@ -25,6 +25,9 @@ import com.satoshilabs.trezor.lib.protobuf.TrezorMessageBitcoin.TxOutput
 import com.satoshilabs.trezor.lib.protobuf.TrezorMessageBitcoin.TxRequest
 import com.satoshilabs.trezor.lib.protobuf.TrezorMessageBitcoin.TxRequest.RequestType
 import com.satoshilabs.trezor.lib.protobuf.TrezorMessageCommon.HDNodeType
+import com.satoshilabs.trezor.lib.protobuf.TrezorMessageEthereum.EthereumDefinitionAck
+import com.satoshilabs.trezor.lib.protobuf.TrezorMessageEthereum.EthereumDefinitionRequest
+import com.satoshilabs.trezor.lib.protobuf.TrezorMessageEthereum.EthereumDefinitions
 import com.satoshilabs.trezor.lib.protobuf.TrezorMessageEthereum.EthereumGetPublicKey
 import com.satoshilabs.trezor.lib.protobuf.TrezorMessageEthereum.EthereumMessageSignature
 import com.satoshilabs.trezor.lib.protobuf.TrezorMessageEthereum.EthereumPublicKey
@@ -58,14 +61,18 @@ import com.satoshilabs.trezor.lib.protobuf.TrezorMessageTron.TronSignTx
 import com.satoshilabs.trezor.lib.protobuf.TrezorMessageTron.TronSignature
 import com.satoshilabs.trezor.lib.protobuf.TrezorMessageTron.TronTransferContract
 import com.satoshilabs.trezor.lib.protobuf.TrezorMessageTron.TronTriggerSmartContract
+import kotlinx.coroutines.CancellationException
 import java.io.ByteArrayOutputStream
 
 /** [ITrezorClient] backed by a [TrezorSession] talking to a USB-connected Trezor. */
-class UsbTrezorClient(private val session: TrezorSession) : ITrezorClient {
+class UsbTrezorClient(
+    private val session: TrezorSession,
+    private val ethereumDefinitionsProvider: TrezorEthereumDefinitionsProvider? = null,
+) : ITrezorClient {
 
     override suspend fun <T> connect(block: suspend TrezorClientSession.() -> T): T =
         session.withSession {
-            val clientSession = SessionImpl(this)
+            val clientSession = SessionImpl(this, ethereumDefinitionsProvider)
             try {
                 // Initialize must be the first message of every session: it resets device state and
                 // establishes the session. Without it the device rejects follow-ups with "Invalid
@@ -81,7 +88,10 @@ class UsbTrezorClient(private val session: TrezorSession) : ITrezorClient {
 /** Trezor requests transaction payload data in chunks of at most this many bytes. */
 private const val ETHEREUM_DATA_CHUNK_SIZE = 1024
 
-private class SessionImpl(private val scope: TrezorSessionScope) : TrezorClientSession {
+private class SessionImpl(
+    private val scope: TrezorSessionScope,
+    private val ethereumDefinitionsProvider: TrezorEthereumDefinitionsProvider?,
+) : TrezorClientSession {
 
     private var cachedFeatures: TrezorFeatures? = null
 
@@ -175,29 +185,32 @@ private class SessionImpl(private val scope: TrezorSessionScope) : TrezorClientS
 
     override suspend fun signEthereum(tx: TrezorEvmTx): TrezorSignature {
         val initialChunk = tx.data.copyOf(minOf(tx.data.size, ETHEREUM_DATA_CHUNK_SIZE))
-        var response = exchangeTyped<EthereumTxRequest>(tx.toSignTxMessage(initialChunk))
-        var sentBytes = initialChunk.size
+        val dataStream = EthereumDataStream(tx.data, initialChunk.size)
+        var response = exchange(tx.toSignTxMessage(initialChunk, ethereumDefinitionsProvider != null))
 
-        while (response.hasDataLength()) {
-            val remaining = tx.data.size - sentBytes
-            if (response.dataLength <= 0 || response.dataLength > remaining) {
-                throw TrezorException(
-                    "Device requested ${response.dataLength} bytes of Ethereum tx data but only $remaining remain",
+        while (true) {
+            when (val current = response) {
+                is EthereumDefinitionRequest -> response = exchange(current.buildAck())
+                is EthereumTxRequest -> {
+                    if (!current.hasDataLength()) return current.toSignature(tx, dataStream)
+                    response = exchange(dataStream.buildAck(current.dataLength))
+                }
+                else -> throw TrezorException(
+                    "Expected EthereumTxRequest or EthereumDefinitionRequest but got ${current::class.simpleName}",
                 )
             }
-            val chunk = tx.data.copyOfRange(sentBytes, sentBytes + response.dataLength)
-            sentBytes += chunk.size
-            val ack = EthereumTxAck.newBuilder().setDataChunk(ByteString.copyFrom(chunk)).build()
-            response = exchangeTyped<EthereumTxRequest>(ack)
         }
-        if (sentBytes != tx.data.size) {
-            throw TrezorException("Device ended the Ethereum sign flow after $sentBytes of ${tx.data.size} data bytes")
-        }
+    }
 
-        val v = response.signatureV
-        val r = response.signatureR.toByteArray()
-        val s = response.signatureS.toByteArray()
-        return TrezorSignature(v = v, r = r, s = s, serializedTx = tx.toSerializedTx(v, r, s))
+    private suspend fun EthereumDefinitionRequest.buildAck(): EthereumDefinitionAck {
+        val definitions = try {
+            ethereumDefinitionsProvider?.getDefinitions(toDto())
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Exception) {
+            null
+        }
+        return definitions.toAck()
     }
 
     override suspend fun signEthereumMessage(addressN: List<Int>, message: ByteArray): TrezorMessageSignature {
@@ -306,7 +319,10 @@ private fun HDNodeType.toKeyResult(xpub: String) = TrezorKeyResult(
 )
 
 /** Builds the initial EVM sign request - legacy or EIP-1559 - carrying [initialChunk] of [TrezorEvmTx.data]. */
-private fun TrezorEvmTx.toSignTxMessage(initialChunk: ByteArray): MessageLite = when (val fee = gasFee) {
+private fun TrezorEvmTx.toSignTxMessage(
+    initialChunk: ByteArray,
+    supportsDefinitionRequest: Boolean,
+): MessageLite = when (val fee = gasFee) {
     is TrezorEvmGasFee.Legacy -> EthereumSignTx.newBuilder()
         .addAllAddressN(addressN)
         .setNonce(ByteString.copyFrom(nonce))
@@ -317,6 +333,7 @@ private fun TrezorEvmTx.toSignTxMessage(initialChunk: ByteArray): MessageLite = 
         .setDataInitialChunk(ByteString.copyFrom(initialChunk))
         .setDataLength(data.size)
         .setChainId(chainId)
+        .apply { if (supportsDefinitionRequest) setSupportsDefinitionRequest(true) }
         .build()
 
     is TrezorEvmGasFee.Eip1559 -> EthereumSignTxEIP1559.newBuilder()
@@ -330,7 +347,59 @@ private fun TrezorEvmTx.toSignTxMessage(initialChunk: ByteArray): MessageLite = 
         .setDataInitialChunk(ByteString.copyFrom(initialChunk))
         .setDataLength(data.size)
         .setChainId(chainId)
+        .apply { if (supportsDefinitionRequest) setSupportsDefinitionRequest(true) }
         .build()
+}
+
+private class EthereumDataStream(
+    private val data: ByteArray,
+    private var sentBytes: Int,
+) {
+    fun buildAck(requestedBytes: Int): EthereumTxAck {
+        val remaining = data.size - sentBytes
+        if (requestedBytes <= 0 || requestedBytes > ETHEREUM_DATA_CHUNK_SIZE || requestedBytes > remaining) {
+            throw TrezorException("Device requested $requestedBytes bytes of Ethereum tx data but only $remaining remain")
+        }
+        val chunk = data.copyOfRange(sentBytes, sentBytes + requestedBytes)
+        sentBytes += chunk.size
+        return EthereumTxAck.newBuilder().setDataChunk(ByteString.copyFrom(chunk)).build()
+    }
+
+    fun requireComplete() {
+        if (sentBytes != data.size) {
+            throw TrezorException("Device ended the Ethereum sign flow after $sentBytes of ${data.size} data bytes")
+        }
+    }
+}
+
+private fun EthereumTxRequest.toSignature(tx: TrezorEvmTx, dataStream: EthereumDataStream): TrezorSignature {
+    dataStream.requireComplete()
+    if (!hasSignatureV() || !hasSignatureR() || !hasSignatureS()) {
+        throw TrezorException("Device ended the Ethereum sign flow without a complete signature")
+    }
+    val r = signatureR.toByteArray()
+    val s = signatureS.toByteArray()
+    return TrezorSignature(v = signatureV, r = r, s = s, serializedTx = tx.toSerializedTx(signatureV, r, s))
+}
+
+private fun EthereumDefinitionRequest.toDto() = TrezorEthereumDefinitionRequest(
+    chainId = chainId,
+    contractAddress = tokenAddress.toByteArray().takeIf(ByteArray::isNotEmpty)?.toHex(),
+    functionSignature = if (hasFuncSig()) funcSig.toByteArray().toHex() else null,
+)
+
+private fun TrezorEthereumDefinitions?.toAck(): EthereumDefinitionAck {
+    val definitions = EthereumDefinitions.newBuilder()
+    this?.encodedNetwork?.takeIf(ByteArray::isNotEmpty)?.let { definitions.encodedNetwork = ByteString.copyFrom(it) }
+    this?.encodedToken?.takeIf(ByteArray::isNotEmpty)?.let { definitions.encodedToken = ByteString.copyFrom(it) }
+    this?.encodedDisplayFormat?.takeIf(ByteArray::isNotEmpty)?.let {
+        definitions.encodedDisplayFormat = ByteString.copyFrom(it)
+    }
+    return EthereumDefinitionAck.newBuilder().apply {
+        if (definitions.hasEncodedNetwork() || definitions.hasEncodedToken() || definitions.hasEncodedDisplayFormat()) {
+            setDefinitions(definitions)
+        }
+    }.build()
 }
 
 /**
