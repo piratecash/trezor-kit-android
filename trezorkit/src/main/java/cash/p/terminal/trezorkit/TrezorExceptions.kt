@@ -59,3 +59,9 @@ class TrezorUsbShortPacketException(
 
 /** The device is connected but has no seed (or is in bootloader mode) - it has not completed setup. */
 class TrezorNotInitializedException(message: String) : TrezorException(message)
+
+/**
+ * The device's signature stream did not map onto the inputs that were sent: an index outside the
+ * input range, the same index twice, or an input left without a signature.
+ */
+class TrezorSignatureMappingException(message: String) : TrezorException(message)

@@ -7,6 +7,8 @@ package cash.p.terminal.trezorkit.client
  * [supportsTron] reflects the device's `Capability_Tron` (Tron signing landed in core firmware 2.11.0);
  * older firmware rejects Tron messages, so callers must not request Tron derivation when it is false.
  * [supportsMonero] reflects the independent `Capability_Monero` firmware predicate.
+ * [supportsZcash] combines `Capability_Bitcoin_like` - the only reported field that tells a
+ * universal build from a Bitcoin-only one - with the firmware version that introduced tx v5.
  */
 data class TrezorFeatures @JvmOverloads constructor(
     val deviceId: String?,
@@ -17,6 +19,7 @@ data class TrezorFeatures @JvmOverloads constructor(
     val initialized: Boolean = true,
     val supportsTron: Boolean = false,
     val supportsMonero: Boolean = false,
+    val supportsZcash: Boolean = false,
 ) {
 
     /**
@@ -287,12 +290,18 @@ sealed class TrezorBtcOutput {
     }
 }
 
-/** An unsigned Bitcoin transaction to sign on-device. */
-data class TrezorBtcSignTx(
+/**
+ * An unsigned Bitcoin transaction to sign on-device. [expiry], [versionGroupId] and [branchId]
+ * belong to Zcash tx v5 consensus branches and stay null for every other coin.
+ */
+data class TrezorBtcSignTx @JvmOverloads constructor(
     val version: Int,
     val lockTime: Long,
     val inputs: List<TrezorBtcInput>,
     val outputs: List<TrezorBtcOutput>,
+    val expiry: Long? = null,
+    val versionGroupId: Long? = null,
+    val branchId: Long? = null,
 )
 
 /** One input of a previous transaction, supplied by the caller so the device can verify the UTXO being spent. */

@@ -2,6 +2,7 @@ package cash.p.terminal.trezorkit.client
 
 import cash.p.terminal.trezorkit.TrezorException
 import cash.p.terminal.trezorkit.TrezorNotInitializedException
+import cash.p.terminal.trezorkit.TrezorSignatureMappingException
 import cash.p.terminal.trezorkit.protocol.TrezorSession
 import cash.p.terminal.trezorkit.protocol.TrezorSessionScope
 import com.google.protobuf.ByteString
@@ -236,6 +237,13 @@ private class SessionImpl(
             .setOutputsCount(tx.outputs.size)
             .setVersion(tx.version)
             .setLockTime(tx.lockTime.toInt())
+            .apply {
+                // Zcash v5 consensus fields. `overwintered` is deliberately left unset: the proto
+                // deprecated it in 2.3.2 and the firmware derives it from the version.
+                tx.expiry?.let { setExpiry(it.toInt()) }
+                tx.versionGroupId?.let { setVersionGroupId(it.toInt()) }
+                tx.branchId?.let { setBranchId(it.toInt()) }
+            }
             .build()
 
         var response = exchangeTyped<TxRequest>(signTx)
@@ -250,7 +258,9 @@ private class SessionImpl(
 
         return TrezorBtcSignResult(
             serializedTx = buffer.toByteArray(),
-            signatures = signatures.map { it ?: error("Device did not return a signature for one or more inputs") },
+            signatures = signatures.mapIndexed { index, signature ->
+                signature ?: throw TrezorSignatureMappingException("Device did not return a signature for input $index")
+            },
         )
     }
 
@@ -299,6 +309,7 @@ private fun Features.toDto() =
         initialized = if (hasInitialized()) initialized else true,
         supportsTron = capabilitiesList.contains(Features.Capability.Capability_Tron),
         supportsMonero = capabilitiesList.contains(Features.Capability.Capability_Monero),
+        supportsZcash = supportsZcash(),
     ).also { features ->
         features.sessionId = if (hasSessionId() && sessionId.size() > 0) {
             val bytes = sessionId.toByteArray()
@@ -311,6 +322,33 @@ private fun Features.toDto() =
             null
         }
     }
+
+private const val LEGACY_INTERNAL_MODEL = "T1B1"
+private val CORE_INTERNAL_MODELS = setOf("T2T1", "T2B1", "T3B1", "T3T1", "T3W1")
+
+/**
+ * There is no `Capability_Zcash`, so the version carries the tx-v5 threshold while
+ * `Capability_Bitcoin_like` - the one capability a Bitcoin-only build omits - rules out firmware
+ * that would refuse a Zcash `GetPublicKey` and fail the whole derivation batch. `internal_model`
+ * is a later protocol field than either threshold, so firmware that omits it is placed by its
+ * major version; any model the device does report but we do not recognise fails closed.
+ */
+private fun Features.supportsZcash(): Boolean {
+    if (!capabilitiesList.contains(Features.Capability.Capability_Bitcoin_like)) return false
+    return when {
+        internalModel == LEGACY_INTERNAL_MODEL -> firmwareAtLeast(1, 11, 1)
+        internalModel in CORE_INTERNAL_MODELS -> firmwareAtLeast(2, 5, 1)
+        hasInternalModel() -> false
+        majorVersion == 1 -> firmwareAtLeast(1, 11, 1)
+        else -> majorVersion == 2 && firmwareAtLeast(2, 5, 1)
+    }
+}
+
+private fun Features.firmwareAtLeast(major: Int, minor: Int, patch: Int): Boolean = when {
+    majorVersion != major -> majorVersion > major
+    minorVersion != minor -> minorVersion > minor
+    else -> patchVersion >= patch
+}
 
 private fun HDNodeType.toKeyResult(xpub: String) = TrezorKeyResult(
     key = xpub,
@@ -448,7 +486,17 @@ private fun String.hexToByteArray(): ByteArray {
 
 /** Accumulates a [TxRequest]'s serialized-data fragment: a signature keyed by input index, and/or a chunk of the final signed transaction. */
 private fun TxRequest.TxRequestSerializedType.collectInto(signatures: Array<ByteArray?>, buffer: ByteArrayOutputStream) {
-    if (hasSignatureIndex() && hasSignature()) signatures[signatureIndex] = signature.toByteArray()
+    if (hasSignatureIndex() && hasSignature()) {
+        if (signatureIndex !in signatures.indices) {
+            throw TrezorSignatureMappingException(
+                "Device signed input $signatureIndex, but only ${signatures.size} inputs were sent",
+            )
+        }
+        if (signatures[signatureIndex] != null) {
+            throw TrezorSignatureMappingException("Device returned two signatures for input $signatureIndex")
+        }
+        signatures[signatureIndex] = signature.toByteArray()
+    }
     if (hasSerializedTx()) buffer.write(serializedTx.toByteArray())
 }
 

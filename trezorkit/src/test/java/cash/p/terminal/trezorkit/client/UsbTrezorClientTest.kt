@@ -2,6 +2,7 @@ package cash.p.terminal.trezorkit.client
 
 import cash.p.terminal.trezorkit.TrezorException
 import cash.p.terminal.trezorkit.TrezorNotInitializedException
+import cash.p.terminal.trezorkit.TrezorSignatureMappingException
 import cash.p.terminal.trezorkit.protocol.FakeTrezorTransport
 import cash.p.terminal.trezorkit.protocol.FramingCodec
 import cash.p.terminal.trezorkit.protocol.MessageTypeRegistry
@@ -231,27 +232,40 @@ class UsbTrezorClientTest {
         outputs = listOf(TrezorPrevTxOutput(amount = 150_000L, scriptPubkey = byteArrayOf(0x76, 0xA9.toByte()))),
     )
 
-    /** Scripts one non-final [TxRequest]: asks for [requestType] data, optionally about a previous tx identified by [txHash]. */
-    private fun txRequest(requestType: RequestType, requestIndex: Int? = null, txHash: ByteArray? = null): ByteArray {
+    /**
+     * Scripts one [TxRequest]: asks for [requestType] data, optionally about a previous tx identified
+     * by [txHash], optionally carrying a signature the device has just produced.
+     */
+    private fun txRequest(
+        requestType: RequestType,
+        requestIndex: Int? = null,
+        txHash: ByteArray? = null,
+        signatureIndex: Int? = null,
+        signature: ByteArray? = null,
+        serializedTx: ByteArray? = null,
+    ): ByteArray {
         val details = TxRequest.TxRequestDetailsType.newBuilder()
         requestIndex?.let(details::setRequestIndex)
         txHash?.let { details.setTxHash(ByteString.copyFrom(it)) }
-        return TxRequest.newBuilder().setRequestType(requestType).setDetails(details.build()).build().toByteArray()
+        val request = TxRequest.newBuilder().setRequestType(requestType).setDetails(details.build())
+        if (signatureIndex != null || signature != null || serializedTx != null) {
+            val serialized = TxRequest.TxRequestSerializedType.newBuilder()
+            signatureIndex?.let(serialized::setSignatureIndex)
+            signature?.let { serialized.setSignature(ByteString.copyFrom(it)) }
+            serializedTx?.let { serialized.setSerializedTx(ByteString.copyFrom(it)) }
+            request.setSerialized(serialized.build())
+        }
+        return request.build().toByteArray()
     }
 
     /** Scripts the final [TxRequest], carrying the input's signature and a chunk of the serialized transaction. */
     private fun txRequestFinished(signatureIndex: Int, signature: ByteArray, serializedTx: ByteArray): ByteArray =
-        TxRequest.newBuilder()
-            .setRequestType(RequestType.TXFINISHED)
-            .setSerialized(
-                TxRequest.TxRequestSerializedType.newBuilder()
-                    .setSignatureIndex(signatureIndex)
-                    .setSignature(ByteString.copyFrom(signature))
-                    .setSerializedTx(ByteString.copyFrom(serializedTx))
-                    .build(),
-            )
-            .build()
-            .toByteArray()
+        txRequest(
+            requestType = RequestType.TXFINISHED,
+            signatureIndex = signatureIndex,
+            signature = signature,
+            serializedTx = serializedTx,
+        )
 
     @Test
     fun getFeatures_happyPath_mapsAllFields() = runTest(UnconfinedTestDispatcher()) {
@@ -393,6 +407,91 @@ class UsbTrezorClientTest {
         val result = client.connect { getFeatures() }
 
         assertTrue(result.supportsMonero)
+    }
+
+    @Test
+    fun getFeatures_everyCoreModelAtZcashThreshold_setsSupportsZcash() =
+        listOf("T2T1", "T2B1", "T3B1", "T3T1", "T3W1").forEach {
+            assertZcashSupport(expected = true, internalModel = it, major = 2, minor = 5, patch = 1)
+        }
+
+    @Test
+    fun getFeatures_firmwareAboveZcashThreshold_setsSupportsZcash() {
+        assertZcashSupport(expected = true, internalModel = "T3T1", major = 2, minor = 5, patch = 4)
+        assertZcashSupport(expected = true, internalModel = "T3T1", major = 2, minor = 6, patch = 0)
+        assertZcashSupport(expected = true, internalModel = "T3T1", major = 3, minor = 0, patch = 0)
+        assertZcashSupport(expected = true, internalModel = "T1B1", major = 1, minor = 12, patch = 0)
+    }
+
+    @Test
+    fun getFeatures_firmwareBelowZcashMinorVersion_clearsSupportsZcash() {
+        assertZcashSupport(expected = false, internalModel = "T3T1", major = 2, minor = 4, patch = 9)
+        assertZcashSupport(expected = false, internalModel = "T1B1", major = 1, minor = 10, patch = 9)
+    }
+
+    @Test
+    fun getFeatures_coreFirmwareBelowZcashThreshold_clearsSupportsZcash() =
+        assertZcashSupport(expected = false, internalModel = "T3T1", major = 2, minor = 5, patch = 0)
+
+    @Test
+    fun getFeatures_trezorOneAtZcashThreshold_setsSupportsZcash() =
+        assertZcashSupport(expected = true, internalModel = "T1B1", major = 1, minor = 11, patch = 1)
+
+    @Test
+    fun getFeatures_trezorOneBelowZcashThreshold_clearsSupportsZcash() =
+        assertZcashSupport(expected = false, internalModel = "T1B1", major = 1, minor = 11, patch = 0)
+
+    @Test
+    fun getFeatures_legacyFirmwareOmittingInternalModel_setsSupportsZcash() =
+        assertZcashSupport(expected = true, internalModel = null, major = 1, minor = 11, patch = 1)
+
+    @Test
+    fun getFeatures_coreFirmwareOmittingInternalModel_setsSupportsZcash() =
+        assertZcashSupport(expected = true, internalModel = null, major = 2, minor = 5, patch = 1)
+
+    @Test
+    fun getFeatures_firmwareOmittingInternalModelBelowThreshold_clearsSupportsZcash() {
+        assertZcashSupport(expected = false, internalModel = null, major = 1, minor = 11, patch = 0)
+        assertZcashSupport(expected = false, internalModel = null, major = 2, minor = 5, patch = 0)
+    }
+
+    @Test
+    fun getFeatures_bitcoinOnlyFirmware_clearsSupportsZcash() =
+        assertZcashSupport(expected = false, bitcoinLike = false)
+
+    @Test
+    fun getFeatures_unknownInternalModel_clearsSupportsZcash() =
+        assertZcashSupport(expected = false, internalModel = "X9Z9")
+
+    @Test
+    fun getFeatures_emptyInternalModel_clearsSupportsZcash() =
+        assertZcashSupport(expected = false, internalModel = "", major = 2, minor = 5, patch = 1)
+
+    @Test
+    fun getFeatures_deviceReportsNoVersion_clearsSupportsZcash() =
+        assertZcashSupport(expected = false, major = 0, minor = 0, patch = 0)
+
+    private fun assertZcashSupport(
+        expected: Boolean,
+        internalModel: String? = "T3T1",
+        major: Int = 2,
+        minor: Int = 5,
+        patch: Int = 1,
+        bitcoinLike: Boolean = true,
+    ) = runTest(UnconfinedTestDispatcher()) {
+        val features = Features.newBuilder()
+            .setMajorVersion(major)
+            .setMinorVersion(minor)
+            .setPatchVersion(patch)
+        internalModel?.let(features::setInternalModel)
+        if (bitcoinLike) features.addCapabilities(Features.Capability.Capability_Bitcoin_like)
+        val client = clientWithResponse(
+            MessageType.MessageType_Features_VALUE,
+            features.build().toByteArray(),
+            UnconfinedTestDispatcher(testScheduler),
+        )
+
+        assertEquals(expected, client.connect { getFeatures() }.supportsZcash)
     }
 
     @Test
@@ -1094,6 +1193,137 @@ class UsbTrezorClientTest {
     }
 
     @Test
+    fun signBitcoin_deviceReportsSignatureIndexOutsideInputRange_throwsMappingFailure() = runTest(UnconfinedTestDispatcher()) {
+        val tx = TrezorBtcSignTx(version = 1, lockTime = 0, inputs = listOf(legacyInput()), outputs = listOf(addressOutput()))
+        val (client, _) = clientWithResponses(
+            UnconfinedTestDispatcher(testScheduler),
+            MessageType.MessageType_TxRequest_VALUE to txRequest(RequestType.TXINPUT, requestIndex = 0),
+            MessageType.MessageType_TxRequest_VALUE to txRequest(RequestType.TXOUTPUT, requestIndex = 0),
+            MessageType.MessageType_TxRequest_VALUE to
+                txRequestFinished(signatureIndex = 1, signature = ByteArray(64) { 1 }, serializedTx = ByteArray(4) { 2 }),
+        )
+
+        assertSignatureMappingFailure { client.connect { signBitcoin("Bitcoin", tx, emptyMap()) } }
+    }
+
+    @Test
+    fun signBitcoin_deviceRepeatsSignatureIndex_throwsMappingFailure() = runTest(UnconfinedTestDispatcher()) {
+        // A single input leaves the duplicate guard as the only one that can fire: index 0 is in
+        // range and its slot is filled, so neither the range nor the missing-slot guard applies.
+        val tx = TrezorBtcSignTx(version = 1, lockTime = 0, inputs = listOf(legacyInput()), outputs = listOf(addressOutput()))
+        val (client, _) = clientWithResponses(
+            UnconfinedTestDispatcher(testScheduler),
+            MessageType.MessageType_TxRequest_VALUE to txRequest(RequestType.TXINPUT, requestIndex = 0),
+            MessageType.MessageType_TxRequest_VALUE to
+                txRequest(RequestType.TXOUTPUT, requestIndex = 0, signatureIndex = 0, signature = ByteArray(64) { 1 }),
+            MessageType.MessageType_TxRequest_VALUE to
+                txRequestFinished(signatureIndex = 0, signature = ByteArray(64) { 3 }, serializedTx = ByteArray(4) { 2 }),
+        )
+
+        assertSignatureMappingFailure { client.connect { signBitcoin("Bitcoin", tx, emptyMap()) } }
+    }
+
+    @Test
+    fun signBitcoin_deviceSendsSignatureWithoutIndex_throwsMappingFailure() = runTest(UnconfinedTestDispatcher()) {
+        val tx = TrezorBtcSignTx(version = 1, lockTime = 0, inputs = listOf(legacyInput()), outputs = listOf(addressOutput()))
+        val unindexedSignature = txRequest(RequestType.TXFINISHED, signature = ByteArray(64) { 1 })
+        val (client, _) = clientWithResponses(
+            UnconfinedTestDispatcher(testScheduler),
+            MessageType.MessageType_TxRequest_VALUE to txRequest(RequestType.TXINPUT, requestIndex = 0),
+            MessageType.MessageType_TxRequest_VALUE to txRequest(RequestType.TXOUTPUT, requestIndex = 0),
+            // An unindexed signature must not be credited to input 0 by the proto's default index.
+            MessageType.MessageType_TxRequest_VALUE to unindexedSignature,
+        )
+
+        // A helper that dropped the signature here would leave the frame empty and the test vacuous.
+        assertTrue(TxRequest.parseFrom(unindexedSignature).serialized.hasSignature())
+        assertSignatureMappingFailure { client.connect { signBitcoin("Bitcoin", tx, emptyMap()) } }
+    }
+
+    @Test
+    fun signBitcoin_deviceLeavesAnInputUnsigned_throwsMappingFailure() = runTest(UnconfinedTestDispatcher()) {
+        val tx = TrezorBtcSignTx(
+            version = 1,
+            lockTime = 0,
+            inputs = listOf(legacyInput(), segwitInput()),
+            outputs = listOf(addressOutput()),
+        )
+        val (client, _) = clientWithResponses(
+            UnconfinedTestDispatcher(testScheduler),
+            MessageType.MessageType_TxRequest_VALUE to txRequest(RequestType.TXINPUT, requestIndex = 0),
+            MessageType.MessageType_TxRequest_VALUE to txRequest(RequestType.TXINPUT, requestIndex = 1),
+            MessageType.MessageType_TxRequest_VALUE to txRequest(RequestType.TXOUTPUT, requestIndex = 0),
+            MessageType.MessageType_TxRequest_VALUE to
+                txRequestFinished(signatureIndex = 0, signature = ByteArray(64) { 1 }, serializedTx = ByteArray(4) { 2 }),
+        )
+
+        assertSignatureMappingFailure { client.connect { signBitcoin("Bitcoin", tx, emptyMap()) } }
+    }
+
+    @Test
+    fun signBitcoin_zcashTransaction_sendsV5ConsensusFieldsWithoutOverwintered() = runTest(UnconfinedTestDispatcher()) {
+        val tx = TrezorBtcSignTx(
+            version = 5,
+            lockTime = 0,
+            inputs = listOf(legacyInput()),
+            outputs = listOf(addressOutput()),
+            expiry = 2_500_000L,
+            versionGroupId = 0x26A7270AL,
+            branchId = 0xC2D6D0B4L,
+        )
+        val (client, transport) = clientWithResponses(
+            UnconfinedTestDispatcher(testScheduler),
+            MessageType.MessageType_TxRequest_VALUE to txRequest(RequestType.TXINPUT, requestIndex = 0),
+            MessageType.MessageType_TxRequest_VALUE to txRequest(RequestType.TXOUTPUT, requestIndex = 0),
+            MessageType.MessageType_TxRequest_VALUE to
+                txRequestFinished(signatureIndex = 0, signature = ByteArray(64) { 1 }, serializedTx = ByteArray(4) { 2 }),
+        )
+
+        // An empty prevTxByHash proves v5 signing never asks for a previous transaction.
+        client.connect { signBitcoin("Zcash", tx, emptyMap()) }
+
+        val signTx = SignTx.parseFrom(transport.sentMessagesAfterInit()[0].payload)
+        // coin_name and version carry proto defaults of 'Bitcoin' and 1, so an unset field would
+        // otherwise read as a valid Bitcoin envelope.
+        assertEquals("Zcash", signTx.coinName)
+        assertEquals(5, signTx.version)
+        assertEquals(2_500_000, signTx.expiry)
+        assertEquals(0x26A7270AL.toInt(), signTx.versionGroupId)
+        // The NU5 branch id does not fit a signed Int - it must survive as the same uint32 bit pattern.
+        assertEquals(0xC2D6D0B4L.toInt(), signTx.branchId)
+        assertFalse(signTx.hasOverwintered())
+    }
+
+    @Test
+    fun signBitcoin_bitcoinTransaction_omitsZcashConsensusFields() = runTest(UnconfinedTestDispatcher()) {
+        val tx = TrezorBtcSignTx(version = 1, lockTime = 0, inputs = listOf(legacyInput()), outputs = listOf(addressOutput()))
+        val (client, transport) = clientWithResponses(
+            UnconfinedTestDispatcher(testScheduler),
+            MessageType.MessageType_TxRequest_VALUE to txRequest(RequestType.TXINPUT, requestIndex = 0),
+            MessageType.MessageType_TxRequest_VALUE to txRequest(RequestType.TXOUTPUT, requestIndex = 0),
+            MessageType.MessageType_TxRequest_VALUE to
+                txRequestFinished(signatureIndex = 0, signature = ByteArray(64) { 1 }, serializedTx = ByteArray(4) { 2 }),
+        )
+
+        client.connect { signBitcoin("Bitcoin", tx, emptyMap()) }
+
+        val signTx = SignTx.parseFrom(transport.sentMessagesAfterInit()[0].payload)
+        assertFalse(signTx.hasExpiry())
+        assertFalse(signTx.hasVersionGroupId())
+        assertFalse(signTx.hasBranchId())
+    }
+
+    private suspend fun assertSignatureMappingFailure(block: suspend () -> Unit) {
+        var caught: Exception? = null
+        try {
+            block()
+        } catch (e: Exception) {
+            caught = e
+        }
+        assertTrue("expected TrezorSignatureMappingException but was $caught", caught is TrezorSignatureMappingException)
+    }
+
+    @Test
     fun signSolana_happyPath_sendsSignTxAndReturnsSignature() = runTest(UnconfinedTestDispatcher()) {
         val serializedTx = ByteArray(16) { it.toByte() }
         val signature = ByteArray(64) { 9 }
@@ -1415,5 +1645,15 @@ class UsbTrezorClientTest {
         val sentMessages = transport.sentMessagesAfterInit()
         assertEquals(listOf(MessageType.MessageType_TronGetAddress_VALUE), sentMessages.map { it.msgType })
         assertEquals(tronPath, TronGetAddress.parseFrom(sentMessages[0].payload).addressNList)
+    }
+
+    @Test
+    fun trezorBtcSignTx_zcashFieldsAdded_keepsPreZcashJvmConstructor() {
+        TrezorBtcSignTx::class.java.getConstructor(
+            Int::class.javaPrimitiveType,
+            Long::class.javaPrimitiveType,
+            List::class.java,
+            List::class.java,
+        )
     }
 }
