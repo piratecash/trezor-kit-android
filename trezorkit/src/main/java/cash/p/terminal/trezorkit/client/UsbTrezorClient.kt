@@ -33,10 +33,15 @@ import com.satoshilabs.trezor.lib.protobuf.TrezorMessageEthereum.EthereumGetPubl
 import com.satoshilabs.trezor.lib.protobuf.TrezorMessageEthereum.EthereumMessageSignature
 import com.satoshilabs.trezor.lib.protobuf.TrezorMessageEthereum.EthereumPublicKey
 import com.satoshilabs.trezor.lib.protobuf.TrezorMessageEthereum.EthereumSignMessage
+import com.satoshilabs.trezor.lib.protobuf.TrezorMessageEthereum.EthereumSignTypedHash
 import com.satoshilabs.trezor.lib.protobuf.TrezorMessageEthereum.EthereumSignTx
 import com.satoshilabs.trezor.lib.protobuf.TrezorMessageEthereum.EthereumSignTxEIP1559
 import com.satoshilabs.trezor.lib.protobuf.TrezorMessageEthereum.EthereumTxAck
 import com.satoshilabs.trezor.lib.protobuf.TrezorMessageEthereum.EthereumTxRequest
+import com.satoshilabs.trezor.lib.protobuf.TrezorMessageEthereum.EthereumTypedDataSignature
+import com.satoshilabs.trezor.lib.protobuf.TrezorMessageEthereumEIP712.EthereumSignTypedData
+import com.satoshilabs.trezor.lib.protobuf.TrezorMessageEthereumEIP712.EthereumTypedDataStructRequest
+import com.satoshilabs.trezor.lib.protobuf.TrezorMessageEthereumEIP712.EthereumTypedDataValueRequest
 import com.satoshilabs.trezor.lib.protobuf.TrezorMessageManagement.Features
 import com.satoshilabs.trezor.lib.protobuf.TrezorMessageManagement.Initialize
 import com.satoshilabs.trezor.lib.protobuf.TrezorMessageSolana.SolanaGetPublicKey
@@ -224,6 +229,37 @@ private class SessionImpl(
             signature = response.signature.toByteArray(),
             address = response.address,
         )
+    }
+
+    override suspend fun signEthereumTypedData(addressN: List<Int>, data: TrezorTypedData): TrezorMessageSignature {
+        val encoder = TypedDataEncoder(data)
+        val request = EthereumSignTypedData.newBuilder()
+            .addAllAddressN(addressN)
+            .setPrimaryType(data.primaryType)
+            .setMetamaskV4Compat(true)
+            .build()
+        var response = exchange(request)
+        while (true) {
+            response = when (val current = response) {
+                is EthereumTypedDataStructRequest -> exchange(encoder.structAck(current.name))
+                is EthereumTypedDataValueRequest -> exchange(encoder.valueAck(current.memberPathList))
+                is EthereumTypedDataSignature -> return current.toMessageSignature()
+                else -> throw TrezorException("Unexpected response ${current::class.simpleName} in EIP-712 sign flow")
+            }
+        }
+    }
+
+    override suspend fun signEthereumTypedHash(
+        addressN: List<Int>,
+        domainSeparatorHash: ByteArray,
+        messageHash: ByteArray?,
+    ): TrezorMessageSignature {
+        val request = EthereumSignTypedHash.newBuilder()
+            .addAllAddressN(addressN)
+            .setDomainSeparatorHash(ByteString.copyFrom(domainSeparatorHash))
+            .apply { messageHash?.let { setMessageHash(ByteString.copyFrom(it)) } }
+            .build()
+        return exchangeTyped<EthereumTypedDataSignature>(request).toMessageSignature()
     }
 
     override suspend fun signBitcoin(
@@ -420,6 +456,9 @@ private fun EthereumTxRequest.toSignature(tx: TrezorEvmTx, dataStream: EthereumD
     return TrezorSignature(v = signatureV, r = r, s = s, serializedTx = tx.toSerializedTx(signatureV, r, s))
 }
 
+private fun EthereumTypedDataSignature.toMessageSignature() =
+    TrezorMessageSignature(signature = signature.toByteArray(), address = address)
+
 private fun EthereumDefinitionRequest.toDto() = TrezorEthereumDefinitionRequest(
     chainId = chainId,
     contractAddress = tokenAddress.toByteArray().takeIf(ByteArray::isNotEmpty)?.toHex(),
@@ -479,8 +518,9 @@ private fun TrezorEvmTx.toSerializedTx(v: Int, r: ByteArray, s: ByteArray): Byte
 }
 
 /** Parses a "0x"-prefixed (or bare) hex string into raw bytes - the inverse of [toHex]. */
-private fun String.hexToByteArray(): ByteArray {
+internal fun String.hexToByteArray(): ByteArray {
     val hex = removePrefix("0x").removePrefix("0X")
+    require(hex.length % 2 == 0 && hex.all { it in '0'..'9' || it in 'a'..'f' || it in 'A'..'F' }) { "Invalid hex string" }
     return ByteArray(hex.length / 2) { i -> hex.substring(i * 2, i * 2 + 2).toInt(16).toByte() }
 }
 

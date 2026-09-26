@@ -171,7 +171,7 @@ data class TrezorEvmTx(
     }
 }
 
-/** Result of signing an EIP-191 personal message on-device: the raw signature and the signing address. */
+/** Result of signing an EIP-191 message or EIP-712 typed data on-device: the raw signature and the signing address. */
 data class TrezorMessageSignature(val signature: ByteArray, val address: String) {
     override fun equals(other: Any?): Boolean {
         if (this === other) return true

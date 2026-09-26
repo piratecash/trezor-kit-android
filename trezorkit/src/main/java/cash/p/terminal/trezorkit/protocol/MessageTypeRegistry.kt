@@ -25,8 +25,15 @@ import com.satoshilabs.trezor.lib.protobuf.TrezorMessageEthereum.EthereumPublicK
 import com.satoshilabs.trezor.lib.protobuf.TrezorMessageEthereum.EthereumSignMessage
 import com.satoshilabs.trezor.lib.protobuf.TrezorMessageEthereum.EthereumSignTx
 import com.satoshilabs.trezor.lib.protobuf.TrezorMessageEthereum.EthereumSignTxEIP1559
+import com.satoshilabs.trezor.lib.protobuf.TrezorMessageEthereum.EthereumSignTypedHash
 import com.satoshilabs.trezor.lib.protobuf.TrezorMessageEthereum.EthereumTxAck
 import com.satoshilabs.trezor.lib.protobuf.TrezorMessageEthereum.EthereumTxRequest
+import com.satoshilabs.trezor.lib.protobuf.TrezorMessageEthereum.EthereumTypedDataSignature
+import com.satoshilabs.trezor.lib.protobuf.TrezorMessageEthereumEIP712.EthereumSignTypedData
+import com.satoshilabs.trezor.lib.protobuf.TrezorMessageEthereumEIP712.EthereumTypedDataStructAck
+import com.satoshilabs.trezor.lib.protobuf.TrezorMessageEthereumEIP712.EthereumTypedDataStructRequest
+import com.satoshilabs.trezor.lib.protobuf.TrezorMessageEthereumEIP712.EthereumTypedDataValueAck
+import com.satoshilabs.trezor.lib.protobuf.TrezorMessageEthereumEIP712.EthereumTypedDataValueRequest
 import com.satoshilabs.trezor.lib.protobuf.TrezorMessageManagement.Features
 import com.satoshilabs.trezor.lib.protobuf.TrezorMessageManagement.GetFeatures
 import com.satoshilabs.trezor.lib.protobuf.TrezorMessageManagement.Initialize
@@ -67,7 +74,9 @@ import kotlin.reflect.KClass
  * (no local derivation for those, so the address itself is fetched from the device),
  * the EVM sign flow (EthereumSignTx, EthereumSignTxEIP1559, EthereumTxRequest,
  * EthereumTxAck, EthereumDefinitionRequest, EthereumDefinitionAck), the EVM personal-message sign flow (EthereumSignMessage,
- * EthereumMessageSignature), and the Bitcoin sign flow (SignTx, TxRequest, and the TxAck family).
+ * EthereumMessageSignature), the EIP-712 typed-data sign flows (EthereumSignTypedData, the
+ * EthereumTypedDataStruct/Value Request+Ack pairs, EthereumSignTypedHash, EthereumTypedDataSignature),
+ * and the Bitcoin sign flow (SignTx, TxRequest, and the TxAck family).
  * `HDNodeType` is not registered here - it is an embedded field type nested inside
  * `PublicKey`/`EthereumPublicKey`, never a standalone wire message.
  *
@@ -136,6 +145,33 @@ object MessageTypeRegistry {
             EthereumMessageSignature::class,
             EthereumMessageSignature::parseFrom,
         ),
+        Entry(MessageType.MessageType_EthereumSignTypedData_VALUE, EthereumSignTypedData::class, EthereumSignTypedData::parseFrom),
+        Entry(
+            MessageType.MessageType_EthereumTypedDataStructRequest_VALUE,
+            EthereumTypedDataStructRequest::class,
+            EthereumTypedDataStructRequest::parseFrom,
+        ),
+        Entry(
+            MessageType.MessageType_EthereumTypedDataStructAck_VALUE,
+            EthereumTypedDataStructAck::class,
+            EthereumTypedDataStructAck::parseFrom,
+        ),
+        Entry(
+            MessageType.MessageType_EthereumTypedDataValueRequest_VALUE,
+            EthereumTypedDataValueRequest::class,
+            EthereumTypedDataValueRequest::parseFrom,
+        ),
+        Entry(
+            MessageType.MessageType_EthereumTypedDataValueAck_VALUE,
+            EthereumTypedDataValueAck::class,
+            EthereumTypedDataValueAck::parseFrom,
+        ),
+        Entry(
+            MessageType.MessageType_EthereumTypedDataSignature_VALUE,
+            EthereumTypedDataSignature::class,
+            EthereumTypedDataSignature::parseFrom,
+        ),
+        Entry(MessageType.MessageType_EthereumSignTypedHash_VALUE, EthereumSignTypedHash::class, EthereumSignTypedHash::parseFrom),
         Entry(MessageType.MessageType_SignTx_VALUE, SignTx::class, SignTx::parseFrom),
         Entry(MessageType.MessageType_TxRequest_VALUE, TxRequest::class, TxRequest::parseFrom),
         Entry(MessageType.MessageType_TxAck_VALUE, TxAckInput::class, TxAckInput::parseFrom),

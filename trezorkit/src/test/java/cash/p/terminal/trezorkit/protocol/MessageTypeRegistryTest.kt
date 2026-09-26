@@ -10,6 +10,13 @@ import com.satoshilabs.trezor.lib.protobuf.TrezorMessageEthereum.EthereumDefinit
 import com.satoshilabs.trezor.lib.protobuf.TrezorMessageEthereum.EthereumGetPublicKey
 import com.satoshilabs.trezor.lib.protobuf.TrezorMessageEthereum.EthereumMessageSignature
 import com.satoshilabs.trezor.lib.protobuf.TrezorMessageEthereum.EthereumSignMessage
+import com.satoshilabs.trezor.lib.protobuf.TrezorMessageEthereum.EthereumSignTypedHash
+import com.satoshilabs.trezor.lib.protobuf.TrezorMessageEthereum.EthereumTypedDataSignature
+import com.satoshilabs.trezor.lib.protobuf.TrezorMessageEthereumEIP712.EthereumSignTypedData
+import com.satoshilabs.trezor.lib.protobuf.TrezorMessageEthereumEIP712.EthereumTypedDataStructAck
+import com.satoshilabs.trezor.lib.protobuf.TrezorMessageEthereumEIP712.EthereumTypedDataStructRequest
+import com.satoshilabs.trezor.lib.protobuf.TrezorMessageEthereumEIP712.EthereumTypedDataValueAck
+import com.satoshilabs.trezor.lib.protobuf.TrezorMessageEthereumEIP712.EthereumTypedDataValueRequest
 import com.satoshilabs.trezor.lib.protobuf.TrezorMessageManagement.Features
 import com.satoshilabs.trezor.lib.protobuf.TrezorMessageManagement.GetFeatures
 import com.satoshilabs.trezor.lib.protobuf.TrezorMessageManagement.Initialize
@@ -222,5 +229,31 @@ class MessageTypeRegistryTest {
         val parsed = MessageTypeRegistry.parse(66, original.toByteArray())
 
         assertEquals(original, parsed)
+    }
+
+    @Test
+    fun typeOf_eip712OutgoingMessages_returnsWireNumbers() {
+        val messages = listOf(
+            EthereumSignTypedData.newBuilder().setPrimaryType("Mail").build(),
+            EthereumTypedDataStructAck.newBuilder().build(),
+            EthereumTypedDataValueAck.newBuilder().setValue(ByteString.copyFrom(byteArrayOf(1))).build(),
+            EthereumSignTypedHash.newBuilder().setDomainSeparatorHash(ByteString.copyFrom(ByteArray(32))).build(),
+        )
+
+        assertEquals(listOf(464, 466, 468, 470), messages.map(MessageTypeRegistry::typeOf))
+    }
+
+    @Test
+    fun parse_eip712IncomingPayloads_returnsEquivalentMessages() {
+        val structRequest = EthereumTypedDataStructRequest.newBuilder().setName("Mail").build()
+        val valueRequest = EthereumTypedDataValueRequest.newBuilder().addAllMemberPath(listOf(1, 0, 2)).build()
+        val signature = EthereumTypedDataSignature.newBuilder()
+            .setSignature(ByteString.copyFrom(ByteArray(65) { 1 }))
+            .setAddress("0xabc123")
+            .build()
+
+        assertEquals(structRequest, MessageTypeRegistry.parse(465, structRequest.toByteArray()))
+        assertEquals(valueRequest, MessageTypeRegistry.parse(467, valueRequest.toByteArray()))
+        assertEquals(signature, MessageTypeRegistry.parse(469, signature.toByteArray()))
     }
 }

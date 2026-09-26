@@ -1,13 +1,16 @@
 package cash.p.terminal.trezorkit.client
 
+import cash.p.terminal.trezorkit.TrezorCancelledException
 import cash.p.terminal.trezorkit.TrezorException
 import cash.p.terminal.trezorkit.TrezorNotInitializedException
 import cash.p.terminal.trezorkit.TrezorSignatureMappingException
+import cash.p.terminal.trezorkit.protocol.DecodedMessage
 import cash.p.terminal.trezorkit.protocol.FakeTrezorTransport
 import cash.p.terminal.trezorkit.protocol.FramingCodec
 import cash.p.terminal.trezorkit.protocol.MessageTypeRegistry
 import cash.p.terminal.trezorkit.protocol.TrezorSession
 import cash.p.terminal.trezorkit.protocol.decodeMessages
+import cash.p.terminal.trezorkit.transport.assertSuspendThrows
 import com.google.protobuf.ByteString
 import com.satoshilabs.trezor.lib.protobuf.TrezorMessage.MessageType
 import com.satoshilabs.trezor.lib.protobuf.TrezorMessageBitcoin.GetPublicKey
@@ -23,6 +26,7 @@ import com.satoshilabs.trezor.lib.protobuf.TrezorMessageBitcoin.TxAckPrevOutput
 import com.satoshilabs.trezor.lib.protobuf.TrezorMessageBitcoin.TxRequest
 import com.satoshilabs.trezor.lib.protobuf.TrezorMessageBitcoin.TxRequest.RequestType
 import com.satoshilabs.trezor.lib.protobuf.TrezorMessageCommon.ButtonRequest
+import com.satoshilabs.trezor.lib.protobuf.TrezorMessageCommon.Failure
 import com.satoshilabs.trezor.lib.protobuf.TrezorMessageCommon.HDNodeType
 import com.satoshilabs.trezor.lib.protobuf.TrezorMessageEthereum.EthereumDefinitionAck
 import com.satoshilabs.trezor.lib.protobuf.TrezorMessageEthereum.EthereumDefinitionRequest
@@ -31,8 +35,18 @@ import com.satoshilabs.trezor.lib.protobuf.TrezorMessageEthereum.EthereumPublicK
 import com.satoshilabs.trezor.lib.protobuf.TrezorMessageEthereum.EthereumSignMessage
 import com.satoshilabs.trezor.lib.protobuf.TrezorMessageEthereum.EthereumSignTx
 import com.satoshilabs.trezor.lib.protobuf.TrezorMessageEthereum.EthereumSignTxEIP1559
+import com.satoshilabs.trezor.lib.protobuf.TrezorMessageEthereum.EthereumSignTypedHash
 import com.satoshilabs.trezor.lib.protobuf.TrezorMessageEthereum.EthereumTxAck
 import com.satoshilabs.trezor.lib.protobuf.TrezorMessageEthereum.EthereumTxRequest
+import com.satoshilabs.trezor.lib.protobuf.TrezorMessageEthereum.EthereumTypedDataSignature
+import com.satoshilabs.trezor.lib.protobuf.TrezorMessageEthereumEIP712.EthereumSignTypedData
+import com.satoshilabs.trezor.lib.protobuf.TrezorMessageEthereumEIP712.EthereumTypedDataStructAck
+import com.satoshilabs.trezor.lib.protobuf.TrezorMessageEthereumEIP712.EthereumTypedDataStructAck.EthereumDataType
+import com.satoshilabs.trezor.lib.protobuf.TrezorMessageEthereumEIP712.EthereumTypedDataStructAck.EthereumFieldType
+import com.satoshilabs.trezor.lib.protobuf.TrezorMessageEthereumEIP712.EthereumTypedDataStructAck.EthereumStructMember
+import com.satoshilabs.trezor.lib.protobuf.TrezorMessageEthereumEIP712.EthereumTypedDataStructRequest
+import com.satoshilabs.trezor.lib.protobuf.TrezorMessageEthereumEIP712.EthereumTypedDataValueAck
+import com.satoshilabs.trezor.lib.protobuf.TrezorMessageEthereumEIP712.EthereumTypedDataValueRequest
 import com.satoshilabs.trezor.lib.protobuf.TrezorMessageManagement.Features
 import com.satoshilabs.trezor.lib.protobuf.TrezorMessageSolana.SolanaPublicKey
 import com.satoshilabs.trezor.lib.protobuf.TrezorMessageSolana.SolanaSignTx
@@ -1035,6 +1049,290 @@ class UsbTrezorClientTest {
         val sentRequest = EthereumSignMessage.parseFrom(sentMessages[0].payload)
         assertEquals(listOf(44, 60, 0, 0, 0), sentRequest.addressNList)
         assertArrayEquals(message, sentRequest.message.toByteArray())
+    }
+
+    private val ethereumPath = listOf(44, 60, 0, 0, 0)
+    private val signerAddress = "0x9999999999999999999999999999999999999999"
+    private val stringType = fieldType(EthereumDataType.STRING)
+
+    private fun fieldType(dataType: EthereumDataType, size: Int? = null): EthereumFieldType =
+        EthereumFieldType.newBuilder().setDataType(dataType).apply { size?.let { setSize(it) } }.build()
+
+    private fun structMember(name: String, type: EthereumFieldType): EthereumStructMember =
+        EthereumStructMember.newBuilder().setName(name).setType(type).build()
+
+    private fun typedMembers(vararg members: Pair<String, String>) = members.map { (name, type) -> TrezorTypedMember(name, type) }
+
+    private fun typedStruct(vararg fields: Pair<String, String>) =
+        TrezorTypedValue.Struct(fields.associate { (name, value) -> name to TrezorTypedValue.Primitive(value) })
+
+    private fun structRequest(name: String): Pair<Int, ByteArray> =
+        MessageType.MessageType_EthereumTypedDataStructRequest_VALUE to
+            EthereumTypedDataStructRequest.newBuilder().setName(name).build().toByteArray()
+
+    private fun valueRequest(vararg memberPath: Int): Pair<Int, ByteArray> =
+        MessageType.MessageType_EthereumTypedDataValueRequest_VALUE to
+            EthereumTypedDataValueRequest.newBuilder().addAllMemberPath(memberPath.toList()).build().toByteArray()
+
+    private fun typedDataSignature(signature: ByteArray): Pair<Int, ByteArray> =
+        MessageType.MessageType_EthereumTypedDataSignature_VALUE to EthereumTypedDataSignature.newBuilder()
+            .setSignature(ByteString.copyFrom(signature))
+            .setAddress(signerAddress)
+            .build()
+            .toByteArray()
+
+    private fun List<DecodedMessage>.structAckMembers(index: Int) = EthereumTypedDataStructAck.parseFrom(this[index].payload).membersList
+
+    private fun List<DecodedMessage>.valueAcks(fromIndex: Int) =
+        drop(fromIndex).map { EthereumTypedDataValueAck.parseFrom(it.payload).value.toByteArray().toList() }
+
+    private val pcashStringFields = listOf(
+        "amount", "type", "recipient", "recipientExtraId", "refundAddress", "refundExtraId",
+        "fromAddress", "fromExtraId", "provider", "clientRequestId",
+    )
+
+    private fun pcashCreateExchange() = TrezorTypedData(
+        primaryType = "CreateExchange",
+        types = mapOf(
+            "EIP712Domain" to typedMembers("name" to "string", "version" to "string"),
+            "Asset" to typedMembers("coinId" to "string", "blockchain" to "string"),
+            "CreateExchange" to typedMembers("from" to "Asset", "to" to "Asset") +
+                pcashStringFields.map { TrezorTypedMember(it, "string") },
+        ),
+        domain = typedStruct("name" to "P.Cash Exchange", "version" to "1"),
+        message = TrezorTypedValue.Struct(
+            mapOf(
+                "from" to typedStruct("coinId" to "bitcoin", "blockchain" to "bitcoin"),
+                "to" to typedStruct("coinId" to "ethereum", "blockchain" to "ethereum"),
+            ) + typedStruct(
+                "amount" to "0.01",
+                "type" to "float",
+                "recipient" to "0x1234567890abcdef1234567890abcdef12345678",
+                "recipientExtraId" to "",
+                "refundAddress" to "",
+                "refundExtraId" to "",
+                "fromAddress" to "",
+                "fromExtraId" to "",
+                "provider" to "changelly",
+                "clientRequestId" to "8d3d9db0-7d1b-43ce-9431-fb530ce2c6ef",
+            ).fields,
+        ),
+    )
+
+    /** Typed data whose message is a single member `value` of [type]; the domain is left out of `types`. */
+    private fun singleMemberTypedData(type: String, value: TrezorTypedValue) = TrezorTypedData(
+        primaryType = "Mail",
+        types = mapOf("Mail" to typedMembers("value" to type)),
+        domain = TrezorTypedValue.Struct(emptyMap()),
+        message = TrezorTypedValue.Struct(mapOf("value" to value)),
+    )
+
+    private fun assertTypedDataRejectedBeforeDeviceMessages(data: TrezorTypedData) = runTest(UnconfinedTestDispatcher()) {
+        val (client, transport) = clientWithResponses(UnconfinedTestDispatcher(testScheduler))
+
+        assertSuspendThrows<IllegalArgumentException> { client.connect { signEthereumTypedData(ethereumPath, data) } }
+
+        assertEquals(0, transport.sentMessagesAfterInit().size)
+    }
+
+    @Test
+    fun signEthereumTypedData_pcashCreateExchange_streamsTypesAndValuesAndReturnsSignature() = runTest(UnconfinedTestDispatcher()) {
+        val signature = ByteArray(65) { it.toByte() }
+        val (client, transport) = clientWithResponses(
+            UnconfinedTestDispatcher(testScheduler),
+            structRequest("EIP712Domain"),
+            structRequest("CreateExchange"),
+            structRequest("Asset"),
+            valueRequest(0, 0),
+            valueRequest(1, 0, 1),
+            valueRequest(1, 1, 0),
+            valueRequest(1, 5),
+            typedDataSignature(signature),
+        )
+
+        val result = client.connect { signEthereumTypedData(ethereumPath, pcashCreateExchange()) }
+
+        assertEquals(TrezorMessageSignature(signature = signature, address = signerAddress), result)
+        val sent = transport.sentMessagesAfterInit()
+        val structAck = MessageType.MessageType_EthereumTypedDataStructAck_VALUE
+        val valueAck = MessageType.MessageType_EthereumTypedDataValueAck_VALUE
+        assertEquals(
+            listOf(MessageType.MessageType_EthereumSignTypedData_VALUE, structAck, structAck, structAck) + List(4) { valueAck },
+            sent.map { it.msgType },
+        )
+        val request = EthereumSignTypedData.parseFrom(sent[0].payload)
+        assertEquals(ethereumPath, request.addressNList)
+        assertEquals("CreateExchange", request.primaryType)
+        assertTrue(request.hasMetamaskV4Compat() && request.metamaskV4Compat)
+        assertEquals(listOf(structMember("name", stringType), structMember("version", stringType)), sent.structAckMembers(1))
+        val assetType = EthereumFieldType.newBuilder()
+            .setDataType(EthereumDataType.STRUCT)
+            .setStructName("Asset")
+            .setSize(2)
+            .build()
+        assertEquals(
+            listOf(structMember("from", assetType), structMember("to", assetType)) +
+                pcashStringFields.map { structMember(it, stringType) },
+            sent.structAckMembers(2),
+        )
+        assertEquals(listOf(structMember("coinId", stringType), structMember("blockchain", stringType)), sent.structAckMembers(3))
+        assertEquals(
+            listOf("P.Cash Exchange", "bitcoin", "ethereum", "").map { it.toByteArray().toList() },
+            sent.valueAcks(fromIndex = 4),
+        )
+    }
+
+    @Test
+    fun signEthereumTypedData_arrayAndAtomicTypes_encodesLikeTrezorlib() = runTest(UnconfinedTestDispatcher()) {
+        val owner = ByteArray(20) { (it + 1).toByte() }
+        val data = TrezorTypedData(
+            primaryType = "Mail",
+            types = mapOf(
+                "Mail" to typedMembers(
+                    "tags" to "string[]",
+                    "amount" to "uint256",
+                    "nonce" to "uint16",
+                    "delta" to "int8",
+                    "owner" to "address",
+                    "ok" to "bool",
+                ),
+            ),
+            domain = TrezorTypedValue.Struct(emptyMap()),
+            message = TrezorTypedValue.Struct(
+                mapOf(
+                    "tags" to TrezorTypedValue.Array(listOf(TrezorTypedValue.Primitive("a"), TrezorTypedValue.Primitive("bc"))),
+                ) + typedStruct(
+                    "amount" to "256",
+                    "nonce" to "0x0102",
+                    "delta" to "-128",
+                    "owner" to "0x" + owner.toHex(),
+                    "ok" to "true",
+                ).fields,
+            ),
+        )
+        val (client, transport) = clientWithResponses(
+            UnconfinedTestDispatcher(testScheduler),
+            structRequest("EIP712Domain"),
+            structRequest("Mail"),
+            *(listOf(intArrayOf(1, 0), intArrayOf(1, 0, 0), intArrayOf(1, 0, 1)) + (1..5).map { intArrayOf(1, it) })
+                .map { valueRequest(*it) }
+                .toTypedArray(),
+            typedDataSignature(ByteArray(65)),
+        )
+
+        client.connect { signEthereumTypedData(ethereumPath, data) }
+
+        val sent = transport.sentMessagesAfterInit()
+        assertEquals(emptyList<EthereumStructMember>(), sent.structAckMembers(1))
+        assertEquals(
+            listOf(
+                structMember(
+                    "tags",
+                    EthereumFieldType.newBuilder().setDataType(EthereumDataType.ARRAY).setEntryType(stringType).build(),
+                ),
+                structMember("amount", fieldType(EthereumDataType.UINT, 32)),
+                structMember("nonce", fieldType(EthereumDataType.UINT, 2)),
+                structMember("delta", fieldType(EthereumDataType.INT, 1)),
+                structMember("owner", fieldType(EthereumDataType.ADDRESS)),
+                structMember("ok", fieldType(EthereumDataType.BOOL)),
+            ),
+            sent.structAckMembers(2),
+        )
+        val expectedValues = listOf(
+            byteArrayOf(0, 2),
+            "a".toByteArray(),
+            "bc".toByteArray(),
+            ByteArray(32).also { it[30] = 1 },
+            byteArrayOf(1, 2),
+            byteArrayOf(0x80.toByte()),
+            owner,
+            byteArrayOf(1),
+        )
+        assertEquals(expectedValues.map { it.toList() }, sent.valueAcks(fromIndex = 3))
+    }
+
+    @Test
+    fun signEthereumTypedData_domainOnlyWithEmptyMessage_signsDomainValues() = runTest(UnconfinedTestDispatcher()) {
+        val signature = ByteArray(65) { 3 }
+        val data = pcashCreateExchange().copy(primaryType = "EIP712Domain", message = TrezorTypedValue.Struct(emptyMap()))
+        val (client, transport) = clientWithResponses(
+            UnconfinedTestDispatcher(testScheduler),
+            structRequest("EIP712Domain"),
+            valueRequest(0, 0),
+            valueRequest(0, 1),
+            typedDataSignature(signature),
+        )
+
+        val result = client.connect { signEthereumTypedData(ethereumPath, data) }
+
+        assertEquals(TrezorMessageSignature(signature = signature, address = signerAddress), result)
+        val sent = transport.sentMessagesAfterInit()
+        assertEquals("EIP712Domain", EthereumSignTypedData.parseFrom(sent[0].payload).primaryType)
+        assertEquals(listOf("P.Cash Exchange", "1").map { it.toByteArray().toList() }, sent.valueAcks(fromIndex = 2))
+    }
+
+    @Test
+    fun signEthereumTypedData_unsupportedType_throwsBeforeDeviceMessages() {
+        listOf("float", "Unknown", "uint7", "uint264", "bytes33", "string[][]").forEach { type ->
+            assertTypedDataRejectedBeforeDeviceMessages(singleMemberTypedData(type, TrezorTypedValue.Primitive("1")))
+        }
+    }
+
+    @Test
+    fun signEthereumTypedData_invalidValue_throwsBeforeDeviceMessages() {
+        listOf(
+            "int8" to TrezorTypedValue.Primitive("128"),
+            "uint8" to TrezorTypedValue.Primitive("-1"),
+            "uint8" to TrezorTypedValue.Primitive("1e3"),
+            "bool" to TrezorTypedValue.Primitive("1"),
+            "address" to TrezorTypedValue.Primitive("0x1234"),
+            "bytes2" to TrezorTypedValue.Primitive("0x123"),
+            "string" to TrezorTypedValue.Array(emptyList()),
+            "uint8[2]" to TrezorTypedValue.Array(listOf(TrezorTypedValue.Primitive("1"))),
+        ).forEach { (type, value) ->
+            assertTypedDataRejectedBeforeDeviceMessages(singleMemberTypedData(type, value))
+        }
+    }
+
+    @Test
+    fun signEthereumTypedData_deviceCancels_throwsTrezorCancelledException() = runTest(UnconfinedTestDispatcher()) {
+        val failure = Failure.newBuilder().setCode(Failure.FailureType.Failure_ActionCancelled).setMessage("Cancelled").build()
+        val (client, _) = clientWithResponses(
+            UnconfinedTestDispatcher(testScheduler),
+            structRequest("EIP712Domain"),
+            MessageType.MessageType_Failure_VALUE to failure.toByteArray(),
+        )
+
+        assertSuspendThrows<TrezorCancelledException> {
+            client.connect { signEthereumTypedData(ethereumPath, pcashCreateExchange()) }
+        }
+    }
+
+    @Test
+    fun signEthereumTypedHash_withMessageHash_sendsBothHashesAndReturnsSignature() = runTest(UnconfinedTestDispatcher()) {
+        val signature = ByteArray(65) { 7 }
+        val domainHash = ByteArray(32) { 1 }
+        val messageHash = ByteArray(32) { 2 }
+        val (client, transport) = clientWithResponses(UnconfinedTestDispatcher(testScheduler), typedDataSignature(signature))
+
+        val result = client.connect { signEthereumTypedHash(ethereumPath, domainHash, messageHash) }
+
+        assertEquals(TrezorMessageSignature(signature = signature, address = signerAddress), result)
+        val sent = transport.sentMessagesAfterInit()
+        assertEquals(listOf(MessageType.MessageType_EthereumSignTypedHash_VALUE), sent.map { it.msgType })
+        val request = EthereumSignTypedHash.parseFrom(sent[0].payload)
+        assertEquals(ethereumPath, request.addressNList)
+        assertArrayEquals(domainHash, request.domainSeparatorHash.toByteArray())
+        assertArrayEquals(messageHash, request.messageHash.toByteArray())
+    }
+
+    @Test
+    fun signEthereumTypedHash_domainOnly_omitsMessageHash() = runTest(UnconfinedTestDispatcher()) {
+        val (client, transport) = clientWithResponses(UnconfinedTestDispatcher(testScheduler), typedDataSignature(ByteArray(65)))
+
+        client.connect { signEthereumTypedHash(ethereumPath, ByteArray(32) { 1 }, messageHash = null) }
+
+        assertFalse(EthereumSignTypedHash.parseFrom(transport.sentMessagesAfterInit()[0].payload).hasMessageHash())
     }
 
     @Test

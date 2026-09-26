@@ -22,6 +22,15 @@ interface TrezorClientSession {
     /** Signs an EIP-191 personal message on-device (ethereumSignMessage) and returns signature + address. */
     suspend fun signEthereumMessage(addressN: List<Int>, message: ByteArray): TrezorMessageSignature
 
+    /** Signs EIP-712 typed data on-device (MetaMask v4 compatible), streaming types and values as requested. */
+    suspend fun signEthereumTypedData(addressN: List<Int>, data: TrezorTypedData): TrezorMessageSignature
+
+    /**
+     * Signs EIP-712 typed data given as its pre-computed hashes, for devices without on-device parsing.
+     * [messageHash] is null for domain-only data.
+     */
+    suspend fun signEthereumTypedHash(addressN: List<Int>, domainSeparatorHash: ByteArray, messageHash: ByteArray?): TrezorMessageSignature
+
     /**
      * Signs a Bitcoin transaction on-device, streaming input/output/previous-transaction
      * details as the device requests them.
