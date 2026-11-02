@@ -2,6 +2,7 @@ package cash.p.terminal.trezorkit.protocol
 
 import cash.p.terminal.trezorkit.TrezorCancelledException
 import cash.p.terminal.trezorkit.TrezorFailureException
+import cash.p.terminal.trezorkit.TrezorInteractionRequiredException
 import cash.p.terminal.trezorkit.TrezorNotInitializedException
 import cash.p.terminal.trezorkit.TrezorTransportException
 import com.satoshilabs.trezor.lib.protobuf.TrezorMessage.MessageType
@@ -92,6 +93,39 @@ class TrezorSessionTest {
         val sentAck = transport.writtenPackets.decodeMessages().last()
         assertEquals(MessageType.MessageType_PassphraseAck_VALUE, sentAck.msgType)
         assertTrue(PassphraseAck.parseFrom(sentAck.payload).onDevice)
+        collectJob.cancel()
+    }
+
+    @Test
+    fun exchange_unattendedButtonRequest_cancelsAndThrows() =
+        assertUnattendedPromptCancelled(MessageType.MessageType_ButtonRequest_VALUE, ButtonRequest.newBuilder().build().toByteArray())
+
+    @Test
+    fun exchange_unattendedPassphraseRequest_cancelsAndThrows() =
+        assertUnattendedPromptCancelled(MessageType.MessageType_PassphraseRequest_VALUE, PassphraseRequest.newBuilder().build().toByteArray())
+
+    private fun assertUnattendedPromptCancelled(promptType: Int, promptPayload: ByteArray) = runTest(UnconfinedTestDispatcher()) {
+        val cancelled = Failure.newBuilder().setCode(Failure.FailureType.Failure_ActionCancelled).build()
+        val responses = FramingCodec.encode(promptType, promptPayload) +
+            FramingCodec.encode(MessageType.MessageType_Failure_VALUE, cancelled.toByteArray())
+        val transport = FakeTrezorTransport(responses)
+        val session = TrezorSession(
+            transport,
+            MessageTypeRegistry,
+            UnconfinedTestDispatcher(testScheduler),
+            TrezorPromptPolicy.Unattended,
+        )
+        val events = mutableListOf<TrezorSessionEvent>()
+        val collectJob = launch { session.events.collect { events.add(it) } }
+
+        assertThrowsSuspend<TrezorInteractionRequiredException> {
+            session.exchange(Initialize.newBuilder().build())
+        }
+
+        val sentTypes = transport.writtenPackets.decodeMessages().map { it.msgType }
+        assertEquals(listOf(MessageType.MessageType_Initialize_VALUE, MessageType.MessageType_Cancel_VALUE), sentTypes)
+        assertEquals(emptyList<TrezorSessionEvent>(), events)
+        assertEquals(0, transport.unreadPacketCount)
         collectJob.cancel()
     }
 

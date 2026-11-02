@@ -18,6 +18,9 @@ class TrezorFailureException(val code: Int?, message: String) : TrezorException(
  */
 class TrezorCancelledException(message: String) : TrezorException(message)
 
+/** An unattended session met a device prompt (button or passphrase) and cancelled it. */
+class TrezorInteractionRequiredException : TrezorException("Trezor requires an action on the device.")
+
 /** A transport-level error occurred: an I/O failure or an operation timing out. */
 open class TrezorTransportException(message: String, cause: Throwable? = null) : TrezorException(message, cause)
 

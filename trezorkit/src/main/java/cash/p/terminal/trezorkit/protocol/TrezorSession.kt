@@ -3,6 +3,7 @@ package cash.p.terminal.trezorkit.protocol
 import cash.p.terminal.trezorkit.TrezorCancelledException
 import cash.p.terminal.trezorkit.TrezorException
 import cash.p.terminal.trezorkit.TrezorFailureException
+import cash.p.terminal.trezorkit.TrezorInteractionRequiredException
 import cash.p.terminal.trezorkit.TrezorNotInitializedException
 import cash.p.terminal.trezorkit.TrezorTransportException
 import cash.p.terminal.trezorkit.transport.ITrezorTransport
@@ -13,6 +14,7 @@ import com.satoshilabs.trezor.lib.protobuf.TrezorMessageCommon.ButtonRequest
 import com.satoshilabs.trezor.lib.protobuf.TrezorMessageCommon.Failure
 import com.satoshilabs.trezor.lib.protobuf.TrezorMessageCommon.PassphraseAck
 import com.satoshilabs.trezor.lib.protobuf.TrezorMessageCommon.PassphraseRequest
+import com.satoshilabs.trezor.lib.protobuf.TrezorMessageManagement.Cancel
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.TimeoutCancellationException
@@ -27,6 +29,12 @@ import kotlinx.coroutines.withTimeout
 sealed class TrezorSessionEvent {
     data object ButtonRequested : TrezorSessionEvent()
     data object PassphraseRequested : TrezorSessionEvent()
+}
+
+/** How [TrezorSession] answers device prompts: [Interactive] acks them, [Unattended] cancels them. */
+enum class TrezorPromptPolicy {
+    Interactive,
+    Unattended,
 }
 
 /** Receiver for the [TrezorSession.withSession] block. The session lock is already held. */
@@ -46,10 +54,11 @@ interface TrezorSessionScope {
  * [Mutex] so the transport's packet stream is never interleaved between concurrent callers,
  * and a scoped session (`open -> block -> close`) runs as one atomic critical section.
  */
-class TrezorSession(
+class TrezorSession @JvmOverloads constructor(
     private val transport: ITrezorTransport,
     private val registry: MessageTypeRegistry,
     private val dispatcher: CoroutineDispatcher = Dispatchers.IO,
+    private val promptPolicy: TrezorPromptPolicy = TrezorPromptPolicy.Interactive,
 ) {
     private val mutex = Mutex()
     private val mutableEvents = MutableSharedFlow<TrezorSessionEvent>(extraBufferCapacity = 1)
@@ -110,10 +119,12 @@ class TrezorSession(
 
             when (val response = registry.parse(decoded.msgType, decoded.payload)) {
                 is ButtonRequest -> {
+                    rejectPromptIfUnattended()
                     mutableEvents.emit(TrezorSessionEvent.ButtonRequested)
                     send(ButtonAck.newBuilder().build())
                 }
                 is PassphraseRequest -> {
+                    rejectPromptIfUnattended()
                     mutableEvents.emit(TrezorSessionEvent.PassphraseRequested)
                     send(PassphraseAck.newBuilder().setOnDevice(true).build())
                 }
@@ -123,8 +134,17 @@ class TrezorSession(
         }
     }
 
-    private suspend fun send(message: MessageLite) {
-        val packets = FramingCodec.encode(registry.typeOf(message), message.toByteArray())
+    private suspend fun rejectPromptIfUnattended() {
+        if (promptPolicy == TrezorPromptPolicy.Interactive) return
+        send(MessageType.MessageType_Cancel_VALUE, Cancel.getDefaultInstance())
+        readMessage() // the device answers Cancel with a Failure
+        throw TrezorInteractionRequiredException()
+    }
+
+    private suspend fun send(message: MessageLite) = send(registry.typeOf(message), message)
+
+    private suspend fun send(msgType: Int, message: MessageLite) {
+        val packets = FramingCodec.encode(msgType, message.toByteArray())
         packets.forEach { packet -> withTimeout(WRITE_TIMEOUT_MS) { transport.writePacket(packet) } }
     }
 

@@ -77,13 +77,17 @@ class UsbTrezorClient @JvmOverloads constructor(
 ) : ITrezorClient {
 
     override suspend fun <T> connect(block: suspend TrezorClientSession.() -> T): T =
+        connect(resumeSessionId = null, block)
+
+    /** Opens the session with [resumeSessionId], so the device resumes that session if it still has it. */
+    suspend fun <T> connect(resumeSessionId: ByteArray?, block: suspend TrezorClientSession.() -> T): T =
         session.withSession {
             val clientSession = SessionImpl(this, ethereumDefinitionsProvider)
             try {
                 // Initialize must be the first message of every session: it resets device state and
                 // establishes the session. Without it the device rejects follow-ups with "Invalid
                 // session" - e.g. scan-to-add fetches keys without first calling getFeatures().
-                clientSession.initialize()
+                clientSession.initialize(resumeSessionId)
                 clientSession.block()
             } finally {
                 clientSession.close()
@@ -102,21 +106,26 @@ private class SessionImpl(
     private var cachedFeatures: TrezorFeatures? = null
 
     /** Sends the mandatory session-opening Initialize and caches the resulting Features. */
-    suspend fun initialize() {
-        val features = requestFeatures()
+    suspend fun initialize(resumeSessionId: ByteArray?) {
+        val features = requestFeatures(resumeSessionId)
         cachedFeatures = features
         if (!features.initialized) {
             throw TrezorNotInitializedException("Trezor is not set up. Complete setup on the device or in Trezor Suite.")
         }
     }
 
-    override suspend fun getFeatures(): TrezorFeatures = cachedFeatures ?: requestFeatures()
+    override suspend fun getFeatures(): TrezorFeatures = cachedFeatures ?: requestFeatures(resumeSessionId = null)
 
-    private suspend fun requestFeatures(): TrezorFeatures =
-        scope.exchange(Initialize.newBuilder().build()).let { response ->
+    private suspend fun requestFeatures(resumeSessionId: ByteArray?): TrezorFeatures =
+        scope.exchange(initializeMessage(resumeSessionId)).let { response ->
             response as? Features
                 ?: throw TrezorException("Expected Features but got ${response::class.simpleName}")
         }.toDto()
+
+    private fun initializeMessage(resumeSessionId: ByteArray?): Initialize =
+        Initialize.newBuilder().apply {
+            resumeSessionId?.let { setSessionId(ByteString.copyFrom(it)) }
+        }.build()
 
     /**
      * Consumes device-initiated Features updates before the response to [message], retaining the
@@ -346,6 +355,7 @@ private fun Features.toDto() =
         supportsTron = capabilitiesList.contains(Features.Capability.Capability_Tron),
         supportsMonero = capabilitiesList.contains(Features.Capability.Capability_Monero),
         supportsZcash = supportsZcash(),
+        unlocked = unlocked,
     ).also { features ->
         features.sessionId = if (hasSessionId() && sessionId.size() > 0) {
             val bytes = sessionId.toByteArray()

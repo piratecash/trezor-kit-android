@@ -27,6 +27,8 @@ import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.async
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.yield
@@ -128,6 +130,96 @@ class TrezorUsbCoordinatorTest {
         }
 
         verify(exactly = 0) { usbManager.openDevice(any()) }
+    }
+
+    @Test
+    fun withPermittedRawChannel_permissionGranted_runsBlockWithoutRequesting() = runTest {
+        val permissionRequester = mockk<UsbPermissionRequester>()
+        var blockRan = false
+
+        coordinator(permissionRequester).withPermittedRawChannel { blockRan = true }
+
+        assertTrue(blockRan)
+        coVerify(exactly = 0) { permissionRequester.requestPermission(any()) }
+    }
+
+    @Test
+    fun withPermittedRawChannel_permissionMissing_throwsWithoutRequesting() = runTest {
+        val permissionRequester = mockk<UsbPermissionRequester>()
+        every { usbManager.hasPermission(device) } returns false
+
+        assertSuspendThrows<TrezorUsbPermissionDeniedException> {
+            coordinator(permissionRequester).withPermittedRawChannel {}
+        }
+
+        coVerify(exactly = 0) { permissionRequester.requestPermission(any()) }
+        verify(exactly = 0) { usbManager.openDevice(any()) }
+    }
+
+    @Test
+    fun isUserOperationWaiting_promptingWaiter_trueUntilAcquired() = runTest {
+        val coordinator = coordinator()
+        val release = holdConnection(coordinator)
+        var waitingInsideBlock = true
+        val waiter = async { coordinator.withRawChannel { waitingInsideBlock = coordinator.isUserOperationWaiting } }
+        yield()
+
+        assertTrue(coordinator.isUserOperationWaiting)
+        release.complete(Unit)
+        waiter.await()
+
+        assertFalse(waitingInsideBlock)
+        assertFalse(coordinator.isUserOperationWaiting)
+    }
+
+    @Test
+    fun isUserOperationWaiting_transportWaiter_true() = runTest {
+        val coordinator = coordinator()
+        val release = holdConnection(coordinator)
+        val waiter = async { coordinator.withTransport {} }
+        yield()
+
+        assertTrue(coordinator.isUserOperationWaiting)
+        release.complete(Unit)
+        waiter.await()
+    }
+
+    @Test
+    fun isUserOperationWaiting_permittedWaiter_false() = runTest {
+        val coordinator = coordinator()
+        val release = holdConnection(coordinator)
+        val waiter = async { coordinator.withPermittedRawChannel {} }
+        yield()
+
+        assertFalse(coordinator.isUserOperationWaiting)
+        release.complete(Unit)
+        waiter.await()
+    }
+
+    @Test
+    fun isUserOperationWaiting_waiterTimesOut_false() = runTest {
+        val coordinator = coordinator(acquireTimeoutMs = ACQUIRE_TIMEOUT_MS)
+        val release = holdConnection(coordinator)
+
+        assertSuspendThrows<TrezorUsbAcquireTimeoutException> {
+            coordinator.withRawChannel {}
+        }
+
+        assertFalse(coordinator.isUserOperationWaiting)
+        release.complete(Unit)
+    }
+
+    @Test
+    fun isUserOperationWaiting_waiterCancelled_false() = runTest {
+        val coordinator = coordinator()
+        val release = holdConnection(coordinator)
+        val waiter = async { coordinator.withRawChannel {} }
+        yield()
+
+        waiter.cancelAndJoin()
+
+        assertFalse(coordinator.isUserOperationWaiting)
+        release.complete(Unit)
     }
 
     @Test
@@ -374,6 +466,20 @@ class TrezorUsbCoordinatorTest {
         }
 
         verify(exactly = 0) { usbManager.openDevice(any()) }
+    }
+
+    /** Holds the connection with a non-prompting lease until the returned signal completes. */
+    private suspend fun TestScope.holdConnection(coordinator: TrezorUsbCoordinator): CompletableDeferred<Unit> {
+        val entered = CompletableDeferred<Unit>()
+        val release = CompletableDeferred<Unit>()
+        launch {
+            coordinator.withPermittedRawChannel {
+                entered.complete(Unit)
+                release.await()
+            }
+        }
+        entered.await()
+        return release
     }
 
     private fun coordinator(

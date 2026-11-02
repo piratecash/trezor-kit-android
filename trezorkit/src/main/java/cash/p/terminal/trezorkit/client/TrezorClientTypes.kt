@@ -20,6 +20,7 @@ data class TrezorFeatures @JvmOverloads constructor(
     val supportsTron: Boolean = false,
     val supportsMonero: Boolean = false,
     val supportsZcash: Boolean = false,
+    val unlocked: Boolean = false,
 ) {
 
     /**

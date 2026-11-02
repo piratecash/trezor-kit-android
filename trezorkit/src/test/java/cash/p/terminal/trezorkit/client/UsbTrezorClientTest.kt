@@ -48,6 +48,7 @@ import com.satoshilabs.trezor.lib.protobuf.TrezorMessageEthereumEIP712.EthereumT
 import com.satoshilabs.trezor.lib.protobuf.TrezorMessageEthereumEIP712.EthereumTypedDataValueAck
 import com.satoshilabs.trezor.lib.protobuf.TrezorMessageEthereumEIP712.EthereumTypedDataValueRequest
 import com.satoshilabs.trezor.lib.protobuf.TrezorMessageManagement.Features
+import com.satoshilabs.trezor.lib.protobuf.TrezorMessageManagement.Initialize
 import com.satoshilabs.trezor.lib.protobuf.TrezorMessageSolana.SolanaPublicKey
 import com.satoshilabs.trezor.lib.protobuf.TrezorMessageSolana.SolanaSignTx
 import com.satoshilabs.trezor.lib.protobuf.TrezorMessageSolana.SolanaTxSignature
@@ -72,6 +73,7 @@ import com.satoshilabs.trezor.lib.protobuf.TrezorMessageTron.TronTriggerSmartCon
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertArrayEquals
@@ -320,6 +322,47 @@ class UsbTrezorClientTest {
         sessionHandle.use {
             assertArrayEquals(sessionId, it.toByteArray())
         }
+    }
+
+    @Test
+    fun connect_resumeSessionId_sendsItInOpeningInitialize() = runTest(UnconfinedTestDispatcher()) {
+        val resumeSessionId = byteArrayOf(5, 6, 7, 8)
+        val (client, transport) = clientWithRawResponses(UnconfinedTestDispatcher(testScheduler), sessionFeaturesResponse())
+
+        client.connect(resumeSessionId) { getFeatures() }
+
+        val initialize = Initialize.parseFrom(transport.writtenPackets.decodeMessages().single().payload)
+        assertArrayEquals(resumeSessionId, initialize.sessionId.toByteArray())
+    }
+
+    @Test
+    fun connect_noResumeSessionId_sendsInitializeWithoutSessionId() = runTest(UnconfinedTestDispatcher()) {
+        val (client, transport) = clientWithRawResponses(UnconfinedTestDispatcher(testScheduler), sessionFeaturesResponse())
+
+        client.connect { getFeatures() }
+
+        val initialize = Initialize.parseFrom(transport.writtenPackets.decodeMessages().single().payload)
+        assertFalse(initialize.hasSessionId())
+    }
+
+    @Test
+    fun getFeatures_deviceReportsUnlocked_setsUnlocked() = runTest(UnconfinedTestDispatcher()) {
+        assertTrue(featuresFor(Features.newBuilder().setUnlocked(true)).unlocked)
+    }
+
+    @Test
+    fun getFeatures_deviceOmitsUnlocked_clearsUnlocked() = runTest(UnconfinedTestDispatcher()) {
+        assertFalse(featuresFor(Features.newBuilder()).unlocked)
+    }
+
+    private suspend fun TestScope.featuresFor(builder: Features.Builder): TrezorFeatures {
+        val features = builder.setMajorVersion(2).setMinorVersion(8).setPatchVersion(10).build()
+        val client = clientWithResponse(
+            MessageType.MessageType_Features_VALUE,
+            features.toByteArray(),
+            UnconfinedTestDispatcher(testScheduler),
+        )
+        return client.connect { getFeatures() }
     }
 
     @Test

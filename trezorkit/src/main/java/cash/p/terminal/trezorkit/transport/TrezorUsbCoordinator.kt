@@ -11,6 +11,7 @@ import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.withTimeoutOrNull
+import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * Serializes access to the one Android USB connection shared by protobuf and native clients.
@@ -26,20 +27,36 @@ class TrezorUsbCoordinator(
     }
 
     private val mutex = Mutex()
+    private val userOperationWaiters = AtomicInteger(0)
+
+    /** True while a prompting acquisition ([withTransport], [withRawChannel]) waits for the connection. */
+    val isUserOperationWaiting: Boolean
+        get() = userOperationWaiters.get() > 0
 
     suspend fun <T> withTransport(block: suspend (ITrezorTransport) -> T): T =
-        withUsbTransport(block)
+        withUsbTransport(prompting = true, block)
 
     suspend fun <T> withRawChannel(block: suspend (TrezorRawUsbChannel) -> T): T =
-        withUsbTransport { transport ->
+        withRawUsbChannel(prompting = true, block)
+
+    /** Like [withRawChannel], but never asks for USB permission: throws [TrezorUsbPermissionDeniedException] instead. */
+    suspend fun <T> withPermittedRawChannel(block: suspend (TrezorRawUsbChannel) -> T): T =
+        withRawUsbChannel(prompting = false, block)
+
+    private suspend fun <T> withRawUsbChannel(
+        prompting: Boolean,
+        block: suspend (TrezorRawUsbChannel) -> T,
+    ): T =
+        withUsbTransport(prompting) { transport ->
             transport.open()
             block(transport.rawChannel())
         }
 
     private suspend fun <T> withUsbTransport(
+        prompting: Boolean,
         block: suspend (UsbTrezorTransport) -> T,
     ): T =
-        withDevice { device ->
+        withDevice(prompting) { device ->
             val transport = UsbTrezorTransport(usbManager, device, dispatcher)
             useTransport(transport) {
                 block(transport)
@@ -65,14 +82,23 @@ class TrezorUsbCoordinator(
         }
     }
 
-    private suspend fun <T> withDevice(block: suspend (UsbDevice) -> T): T {
-        acquireTrezorUsbMutex(mutex, acquireTimeoutMs)
+    private suspend fun <T> withDevice(prompting: Boolean, block: suspend (UsbDevice) -> T): T {
+        acquireMutex(prompting)
         try {
             val device = findDevice()
-            ensurePermission(device)
+            ensurePermission(device, prompting)
             return block(device)
         } finally {
             mutex.unlock()
+        }
+    }
+
+    private suspend fun acquireMutex(prompting: Boolean) {
+        if (prompting) userOperationWaiters.incrementAndGet()
+        try {
+            acquireTrezorUsbMutex(mutex, acquireTimeoutMs)
+        } finally {
+            if (prompting) userOperationWaiters.decrementAndGet()
         }
     }
 
@@ -93,8 +119,9 @@ class TrezorUsbCoordinator(
         }
     }
 
-    private suspend fun ensurePermission(device: UsbDevice) {
+    private suspend fun ensurePermission(device: UsbDevice, prompting: Boolean) {
         if (usbManager.hasPermission(device)) return
+        if (!prompting) throw TrezorUsbPermissionDeniedException()
         val granted = permissionRequester.requestPermission(device)
         if (!isAttached(device)) throw TrezorUsbDisconnectedException()
         if (!granted || !usbManager.hasPermission(device)) {
