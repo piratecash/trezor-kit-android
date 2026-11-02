@@ -1,12 +1,16 @@
 package cash.p.terminal.trezorkit.client
 
+import cash.p.terminal.trezorkit.TrezorCancelledException
 import cash.p.terminal.trezorkit.TrezorException
 import cash.p.terminal.trezorkit.TrezorNotInitializedException
+import cash.p.terminal.trezorkit.TrezorSignatureMappingException
+import cash.p.terminal.trezorkit.protocol.DecodedMessage
 import cash.p.terminal.trezorkit.protocol.FakeTrezorTransport
 import cash.p.terminal.trezorkit.protocol.FramingCodec
 import cash.p.terminal.trezorkit.protocol.MessageTypeRegistry
 import cash.p.terminal.trezorkit.protocol.TrezorSession
 import cash.p.terminal.trezorkit.protocol.decodeMessages
+import cash.p.terminal.trezorkit.transport.assertSuspendThrows
 import com.google.protobuf.ByteString
 import com.satoshilabs.trezor.lib.protobuf.TrezorMessage.MessageType
 import com.satoshilabs.trezor.lib.protobuf.TrezorMessageBitcoin.GetPublicKey
@@ -22,11 +26,29 @@ import com.satoshilabs.trezor.lib.protobuf.TrezorMessageBitcoin.TxAckPrevOutput
 import com.satoshilabs.trezor.lib.protobuf.TrezorMessageBitcoin.TxRequest
 import com.satoshilabs.trezor.lib.protobuf.TrezorMessageBitcoin.TxRequest.RequestType
 import com.satoshilabs.trezor.lib.protobuf.TrezorMessageCommon.ButtonRequest
+import com.satoshilabs.trezor.lib.protobuf.TrezorMessageCommon.Failure
 import com.satoshilabs.trezor.lib.protobuf.TrezorMessageCommon.HDNodeType
+import com.satoshilabs.trezor.lib.protobuf.TrezorMessageEthereum.EthereumDefinitionAck
+import com.satoshilabs.trezor.lib.protobuf.TrezorMessageEthereum.EthereumDefinitionRequest
+import com.satoshilabs.trezor.lib.protobuf.TrezorMessageEthereum.EthereumMessageSignature
 import com.satoshilabs.trezor.lib.protobuf.TrezorMessageEthereum.EthereumPublicKey
+import com.satoshilabs.trezor.lib.protobuf.TrezorMessageEthereum.EthereumSignMessage
+import com.satoshilabs.trezor.lib.protobuf.TrezorMessageEthereum.EthereumSignTx
+import com.satoshilabs.trezor.lib.protobuf.TrezorMessageEthereum.EthereumSignTxEIP1559
+import com.satoshilabs.trezor.lib.protobuf.TrezorMessageEthereum.EthereumSignTypedHash
 import com.satoshilabs.trezor.lib.protobuf.TrezorMessageEthereum.EthereumTxAck
 import com.satoshilabs.trezor.lib.protobuf.TrezorMessageEthereum.EthereumTxRequest
+import com.satoshilabs.trezor.lib.protobuf.TrezorMessageEthereum.EthereumTypedDataSignature
+import com.satoshilabs.trezor.lib.protobuf.TrezorMessageEthereumEIP712.EthereumSignTypedData
+import com.satoshilabs.trezor.lib.protobuf.TrezorMessageEthereumEIP712.EthereumTypedDataStructAck
+import com.satoshilabs.trezor.lib.protobuf.TrezorMessageEthereumEIP712.EthereumTypedDataStructAck.EthereumDataType
+import com.satoshilabs.trezor.lib.protobuf.TrezorMessageEthereumEIP712.EthereumTypedDataStructAck.EthereumFieldType
+import com.satoshilabs.trezor.lib.protobuf.TrezorMessageEthereumEIP712.EthereumTypedDataStructAck.EthereumStructMember
+import com.satoshilabs.trezor.lib.protobuf.TrezorMessageEthereumEIP712.EthereumTypedDataStructRequest
+import com.satoshilabs.trezor.lib.protobuf.TrezorMessageEthereumEIP712.EthereumTypedDataValueAck
+import com.satoshilabs.trezor.lib.protobuf.TrezorMessageEthereumEIP712.EthereumTypedDataValueRequest
 import com.satoshilabs.trezor.lib.protobuf.TrezorMessageManagement.Features
+import com.satoshilabs.trezor.lib.protobuf.TrezorMessageManagement.Initialize
 import com.satoshilabs.trezor.lib.protobuf.TrezorMessageSolana.SolanaPublicKey
 import com.satoshilabs.trezor.lib.protobuf.TrezorMessageSolana.SolanaSignTx
 import com.satoshilabs.trezor.lib.protobuf.TrezorMessageSolana.SolanaTxSignature
@@ -38,17 +60,38 @@ import com.satoshilabs.trezor.lib.protobuf.TrezorMessageStellar.StellarPaymentOp
 import com.satoshilabs.trezor.lib.protobuf.TrezorMessageStellar.StellarSignTx
 import com.satoshilabs.trezor.lib.protobuf.TrezorMessageStellar.StellarSignedTx
 import com.satoshilabs.trezor.lib.protobuf.TrezorMessageStellar.StellarTxOpRequest
+import com.satoshilabs.trezor.lib.protobuf.TrezorMessageTron.TronAddress
+import com.satoshilabs.trezor.lib.protobuf.TrezorMessageTron.TronContractRequest
+import com.satoshilabs.trezor.lib.protobuf.TrezorMessageTron.TronFreezeBalanceV2Contract
+import com.satoshilabs.trezor.lib.protobuf.TrezorMessageTron.TronGetAddress
+import com.satoshilabs.trezor.lib.protobuf.TrezorMessageTron.TronRawTransaction
+import com.satoshilabs.trezor.lib.protobuf.TrezorMessageTron.TronRawTransaction.TronRawContract
+import com.satoshilabs.trezor.lib.protobuf.TrezorMessageTron.TronSignTx
+import com.satoshilabs.trezor.lib.protobuf.TrezorMessageTron.TronSignature
+import com.satoshilabs.trezor.lib.protobuf.TrezorMessageTron.TronTransferContract
+import com.satoshilabs.trezor.lib.protobuf.TrezorMessageTron.TronTriggerSmartContract
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class UsbTrezorClientTest {
+
+    @Test
+    fun constructor_singleSessionParameter_remainsJvmCompatible() {
+        val constructor = UsbTrezorClient::class.java.getConstructor(TrezorSession::class.java)
+
+        assertEquals(1, constructor.parameterCount)
+    }
 
     // The dispatcher must share the calling test's own scheduler (see [TrezorSessionTest]) -
     // an unrelated TestDispatcher would run on a disconnected virtual clock and never complete.
@@ -65,16 +108,30 @@ class UsbTrezorClientTest {
         dispatcher: CoroutineDispatcher,
         vararg messages: Pair<Int, ByteArray>,
     ): Pair<UsbTrezorClient, FakeTrezorTransport> =
-        clientWithRawResponses(dispatcher, sessionFeaturesResponse(), *messages)
+        clientWithProviderResponses(dispatcher, null, *messages)
+
+    private fun clientWithProviderResponses(
+        dispatcher: CoroutineDispatcher,
+        provider: TrezorEthereumDefinitionsProvider?,
+        vararg messages: Pair<Int, ByteArray>,
+    ): Pair<UsbTrezorClient, FakeTrezorTransport> =
+        clientWithRawResponses(dispatcher, provider, sessionFeaturesResponse(), *messages)
 
     private fun clientWithRawResponses(
         dispatcher: CoroutineDispatcher,
+        vararg messages: Pair<Int, ByteArray>,
+    ): Pair<UsbTrezorClient, FakeTrezorTransport> =
+        clientWithRawResponses(dispatcher, null, *messages)
+
+    private fun clientWithRawResponses(
+        dispatcher: CoroutineDispatcher,
+        provider: TrezorEthereumDefinitionsProvider?,
         vararg messages: Pair<Int, ByteArray>,
     ): Pair<UsbTrezorClient, FakeTrezorTransport> {
         val responses = messages.flatMap { (msgType, payload) -> FramingCodec.encode(msgType, payload) }
         val transport = FakeTrezorTransport(responses)
         val session = TrezorSession(transport, MessageTypeRegistry, dispatcher)
-        return UsbTrezorClient(session) to transport
+        return UsbTrezorClient(session, provider) to transport
     }
 
     private fun sessionFeaturesResponse(): Pair<Int, ByteArray> =
@@ -191,30 +248,44 @@ class UsbTrezorClientTest {
         outputs = listOf(TrezorPrevTxOutput(amount = 150_000L, scriptPubkey = byteArrayOf(0x76, 0xA9.toByte()))),
     )
 
-    /** Scripts one non-final [TxRequest]: asks for [requestType] data, optionally about a previous tx identified by [txHash]. */
-    private fun txRequest(requestType: RequestType, requestIndex: Int? = null, txHash: ByteArray? = null): ByteArray {
+    /**
+     * Scripts one [TxRequest]: asks for [requestType] data, optionally about a previous tx identified
+     * by [txHash], optionally carrying a signature the device has just produced.
+     */
+    private fun txRequest(
+        requestType: RequestType,
+        requestIndex: Int? = null,
+        txHash: ByteArray? = null,
+        signatureIndex: Int? = null,
+        signature: ByteArray? = null,
+        serializedTx: ByteArray? = null,
+    ): ByteArray {
         val details = TxRequest.TxRequestDetailsType.newBuilder()
         requestIndex?.let(details::setRequestIndex)
         txHash?.let { details.setTxHash(ByteString.copyFrom(it)) }
-        return TxRequest.newBuilder().setRequestType(requestType).setDetails(details.build()).build().toByteArray()
+        val request = TxRequest.newBuilder().setRequestType(requestType).setDetails(details.build())
+        if (signatureIndex != null || signature != null || serializedTx != null) {
+            val serialized = TxRequest.TxRequestSerializedType.newBuilder()
+            signatureIndex?.let(serialized::setSignatureIndex)
+            signature?.let { serialized.setSignature(ByteString.copyFrom(it)) }
+            serializedTx?.let { serialized.setSerializedTx(ByteString.copyFrom(it)) }
+            request.setSerialized(serialized.build())
+        }
+        return request.build().toByteArray()
     }
 
     /** Scripts the final [TxRequest], carrying the input's signature and a chunk of the serialized transaction. */
     private fun txRequestFinished(signatureIndex: Int, signature: ByteArray, serializedTx: ByteArray): ByteArray =
-        TxRequest.newBuilder()
-            .setRequestType(RequestType.TXFINISHED)
-            .setSerialized(
-                TxRequest.TxRequestSerializedType.newBuilder()
-                    .setSignatureIndex(signatureIndex)
-                    .setSignature(ByteString.copyFrom(signature))
-                    .setSerializedTx(ByteString.copyFrom(serializedTx))
-                    .build(),
-            )
-            .build()
-            .toByteArray()
+        txRequest(
+            requestType = RequestType.TXFINISHED,
+            signatureIndex = signatureIndex,
+            signature = signature,
+            serializedTx = serializedTx,
+        )
 
     @Test
     fun getFeatures_happyPath_mapsAllFields() = runTest(UnconfinedTestDispatcher()) {
+        val sessionId = byteArrayOf(1, 2, 3, 4)
         val features = Features.newBuilder()
             .setDeviceId("device-1")
             .setModel("T")
@@ -224,12 +295,18 @@ class UsbTrezorClientTest {
             .setPatchVersion(3)
             .setPassphraseProtection(true)
             .setInitialized(true)
+            .setSessionId(ByteString.copyFrom(sessionId))
             .build()
         val client = clientWithResponse(
             MessageType.MessageType_Features_VALUE, features.toByteArray(), UnconfinedTestDispatcher(testScheduler),
         )
 
-        val result = client.connect { getFeatures() }
+        lateinit var sessionHandle: TrezorSessionId
+        val result = client.connect {
+            getFeatures().also {
+                sessionHandle = checkNotNull(it.takeSessionId())
+            }
+        }
 
         assertEquals(
             TrezorFeatures(
@@ -242,6 +319,236 @@ class UsbTrezorClientTest {
             ),
             result,
         )
+        sessionHandle.use {
+            assertArrayEquals(sessionId, it.toByteArray())
+        }
+    }
+
+    @Test
+    fun connect_resumeSessionId_sendsItInOpeningInitialize() = runTest(UnconfinedTestDispatcher()) {
+        val resumeSessionId = byteArrayOf(5, 6, 7, 8)
+        val (client, transport) = clientWithRawResponses(UnconfinedTestDispatcher(testScheduler), sessionFeaturesResponse())
+
+        client.connect(resumeSessionId) { getFeatures() }
+
+        val initialize = Initialize.parseFrom(transport.writtenPackets.decodeMessages().single().payload)
+        assertArrayEquals(resumeSessionId, initialize.sessionId.toByteArray())
+    }
+
+    @Test
+    fun connect_noResumeSessionId_sendsInitializeWithoutSessionId() = runTest(UnconfinedTestDispatcher()) {
+        val (client, transport) = clientWithRawResponses(UnconfinedTestDispatcher(testScheduler), sessionFeaturesResponse())
+
+        client.connect { getFeatures() }
+
+        val initialize = Initialize.parseFrom(transport.writtenPackets.decodeMessages().single().payload)
+        assertFalse(initialize.hasSessionId())
+    }
+
+    @Test
+    fun getFeatures_deviceReportsUnlocked_setsUnlocked() = runTest(UnconfinedTestDispatcher()) {
+        assertTrue(featuresFor(Features.newBuilder().setUnlocked(true)).unlocked)
+    }
+
+    @Test
+    fun getFeatures_deviceOmitsUnlocked_clearsUnlocked() = runTest(UnconfinedTestDispatcher()) {
+        assertFalse(featuresFor(Features.newBuilder()).unlocked)
+    }
+
+    private suspend fun TestScope.featuresFor(builder: Features.Builder): TrezorFeatures {
+        val features = builder.setMajorVersion(2).setMinorVersion(8).setPatchVersion(10).build()
+        val client = clientWithResponse(
+            MessageType.MessageType_Features_VALUE,
+            features.toByteArray(),
+            UnconfinedTestDispatcher(testScheduler),
+        )
+        return client.connect { getFeatures() }
+    }
+
+    @Test
+    fun getFeatures_sessionIdNotTransferred_closesHandleWhenConnectEnds() =
+        runTest(UnconfinedTestDispatcher()) {
+            val features = Features.newBuilder()
+                .setMajorVersion(2)
+                .setMinorVersion(8)
+                .setPatchVersion(10)
+                .setSessionId(ByteString.copyFrom(byteArrayOf(1, 2, 3, 4)))
+                .build()
+            val client = clientWithResponse(
+                MessageType.MessageType_Features_VALUE,
+                features.toByteArray(),
+                UnconfinedTestDispatcher(testScheduler),
+            )
+            lateinit var handle: TrezorSessionId
+
+            client.connect {
+                handle = checkNotNull(getFeatures().sessionId)
+            }
+
+            assertThrows(IllegalStateException::class.java, handle::toByteArray)
+        }
+
+    @Test
+    fun connect_uninitializedFeaturesWithSessionId_closesSessionBeforeThrowing() =
+        runTest(UnconfinedTestDispatcher()) {
+            val features = Features.newBuilder()
+                .setMajorVersion(2)
+                .setMinorVersion(8)
+                .setPatchVersion(10)
+                .setInitialized(false)
+                .setSessionId(ByteString.copyFrom(byteArrayOf(1, 2, 3, 4)))
+                .build()
+            val client = clientWithResponse(
+                MessageType.MessageType_Features_VALUE,
+                features.toByteArray(),
+                UnconfinedTestDispatcher(testScheduler),
+            )
+
+            val error = try {
+                client.connect { getFeatures() }
+                null
+            } catch (error: Throwable) {
+                error
+            }
+
+            assertTrue(error is TrezorNotInitializedException)
+        }
+
+    @Test
+    fun sessionId_mutatingSourceOrReturnedArray_doesNotChangeValue() {
+        val source = byteArrayOf(1, 2, 3)
+        val sessionId = TrezorSessionId(source)
+
+        source[0] = 9
+        val returned = sessionId.toByteArray()
+        returned[1] = 9
+
+        assertArrayEquals(byteArrayOf(1, 2, 3), sessionId.toByteArray())
+        sessionId.close()
+        assertThrows(IllegalStateException::class.java, sessionId::toByteArray)
+    }
+
+    @Test
+    fun getFeatures_deviceReportsTronCapability_setsSupportsTron() = runTest(UnconfinedTestDispatcher()) {
+        val features = Features.newBuilder()
+            .setInternalModel("T3B1")
+            .setMajorVersion(2)
+            .setMinorVersion(11)
+            .setPatchVersion(0)
+            .addCapabilities(Features.Capability.Capability_Tron)
+            .build()
+        val client = clientWithResponse(
+            MessageType.MessageType_Features_VALUE, features.toByteArray(), UnconfinedTestDispatcher(testScheduler),
+        )
+
+        val result = client.connect { getFeatures() }
+
+        assertTrue(result.supportsTron)
+    }
+
+    @Test
+    fun getFeatures_deviceReportsMoneroCapability_setsSupportsMonero() = runTest(UnconfinedTestDispatcher()) {
+        val features = Features.newBuilder()
+            .setInternalModel("T3T1")
+            .setMajorVersion(2)
+            .setMinorVersion(8)
+            .setPatchVersion(10)
+            .addCapabilities(Features.Capability.Capability_Monero)
+            .build()
+        val client = clientWithResponse(
+            MessageType.MessageType_Features_VALUE,
+            features.toByteArray(),
+            UnconfinedTestDispatcher(testScheduler),
+        )
+
+        val result = client.connect { getFeatures() }
+
+        assertTrue(result.supportsMonero)
+    }
+
+    @Test
+    fun getFeatures_everyCoreModelAtZcashThreshold_setsSupportsZcash() =
+        listOf("T2T1", "T2B1", "T3B1", "T3T1", "T3W1").forEach {
+            assertZcashSupport(expected = true, internalModel = it, major = 2, minor = 5, patch = 1)
+        }
+
+    @Test
+    fun getFeatures_firmwareAboveZcashThreshold_setsSupportsZcash() {
+        assertZcashSupport(expected = true, internalModel = "T3T1", major = 2, minor = 5, patch = 4)
+        assertZcashSupport(expected = true, internalModel = "T3T1", major = 2, minor = 6, patch = 0)
+        assertZcashSupport(expected = true, internalModel = "T3T1", major = 3, minor = 0, patch = 0)
+        assertZcashSupport(expected = true, internalModel = "T1B1", major = 1, minor = 12, patch = 0)
+    }
+
+    @Test
+    fun getFeatures_firmwareBelowZcashMinorVersion_clearsSupportsZcash() {
+        assertZcashSupport(expected = false, internalModel = "T3T1", major = 2, minor = 4, patch = 9)
+        assertZcashSupport(expected = false, internalModel = "T1B1", major = 1, minor = 10, patch = 9)
+    }
+
+    @Test
+    fun getFeatures_coreFirmwareBelowZcashThreshold_clearsSupportsZcash() =
+        assertZcashSupport(expected = false, internalModel = "T3T1", major = 2, minor = 5, patch = 0)
+
+    @Test
+    fun getFeatures_trezorOneAtZcashThreshold_setsSupportsZcash() =
+        assertZcashSupport(expected = true, internalModel = "T1B1", major = 1, minor = 11, patch = 1)
+
+    @Test
+    fun getFeatures_trezorOneBelowZcashThreshold_clearsSupportsZcash() =
+        assertZcashSupport(expected = false, internalModel = "T1B1", major = 1, minor = 11, patch = 0)
+
+    @Test
+    fun getFeatures_legacyFirmwareOmittingInternalModel_setsSupportsZcash() =
+        assertZcashSupport(expected = true, internalModel = null, major = 1, minor = 11, patch = 1)
+
+    @Test
+    fun getFeatures_coreFirmwareOmittingInternalModel_setsSupportsZcash() =
+        assertZcashSupport(expected = true, internalModel = null, major = 2, minor = 5, patch = 1)
+
+    @Test
+    fun getFeatures_firmwareOmittingInternalModelBelowThreshold_clearsSupportsZcash() {
+        assertZcashSupport(expected = false, internalModel = null, major = 1, minor = 11, patch = 0)
+        assertZcashSupport(expected = false, internalModel = null, major = 2, minor = 5, patch = 0)
+    }
+
+    @Test
+    fun getFeatures_bitcoinOnlyFirmware_clearsSupportsZcash() =
+        assertZcashSupport(expected = false, bitcoinLike = false)
+
+    @Test
+    fun getFeatures_unknownInternalModel_clearsSupportsZcash() =
+        assertZcashSupport(expected = false, internalModel = "X9Z9")
+
+    @Test
+    fun getFeatures_emptyInternalModel_clearsSupportsZcash() =
+        assertZcashSupport(expected = false, internalModel = "", major = 2, minor = 5, patch = 1)
+
+    @Test
+    fun getFeatures_deviceReportsNoVersion_clearsSupportsZcash() =
+        assertZcashSupport(expected = false, major = 0, minor = 0, patch = 0)
+
+    private fun assertZcashSupport(
+        expected: Boolean,
+        internalModel: String? = "T3T1",
+        major: Int = 2,
+        minor: Int = 5,
+        patch: Int = 1,
+        bitcoinLike: Boolean = true,
+    ) = runTest(UnconfinedTestDispatcher()) {
+        val features = Features.newBuilder()
+            .setMajorVersion(major)
+            .setMinorVersion(minor)
+            .setPatchVersion(patch)
+        internalModel?.let(features::setInternalModel)
+        if (bitcoinLike) features.addCapabilities(Features.Capability.Capability_Bitcoin_like)
+        val client = clientWithResponse(
+            MessageType.MessageType_Features_VALUE,
+            features.build().toByteArray(),
+            UnconfinedTestDispatcher(testScheduler),
+        )
+
+        assertEquals(expected, client.connect { getFeatures() }.supportsZcash)
     }
 
     @Test
@@ -341,6 +648,76 @@ class UsbTrezorClientTest {
     }
 
     @Test
+    fun getPublicKeys_featuresBeforePublicKey_recoversWithoutResendingAndRetainsNewestFeaturesSession() =
+        runTest(UnconfinedTestDispatcher()) {
+            val newestSessionId = byteArrayOf(9, 8, 7, 6)
+            val extraFeatures = Features.newBuilder()
+                .setMajorVersion(2)
+                .setMinorVersion(8)
+                .setPatchVersion(10)
+                .setInitialized(true)
+                .setSessionId(ByteString.copyFrom(newestSessionId))
+                .addCapabilities(Features.Capability.Capability_Monero)
+                .build()
+            val staleFeatures = extraFeatures.toBuilder()
+                .setSessionId(ByteString.copyFrom(byteArrayOf(1)))
+                .build()
+            val (client, transport) = clientWithRawResponses(
+                UnconfinedTestDispatcher(testScheduler),
+                sessionFeaturesResponse(),
+                MessageType.MessageType_Features_VALUE to staleFeatures.toByteArray(),
+                MessageType.MessageType_Features_VALUE to extraFeatures.toByteArray(),
+                MessageType.MessageType_PublicKey_VALUE to bitcoinPublicKeyResponse("xpub-recovered"),
+            )
+
+            lateinit var recoveredSessionId: TrezorSessionId
+            val (keys, recoveredFeatures) = client.connect {
+                val keys = getPublicKeys(
+                    listOf(TrezorPublicKeyRequest.Bitcoin("Bitcoin", listOf(44, 0, 0), TrezorInputScriptType.SPENDADDRESS)),
+                )
+                val features = getFeatures()
+                recoveredSessionId = checkNotNull(features.takeSessionId())
+                keys to features
+            }
+
+            assertEquals("xpub-recovered", keys.single().key)
+            assertEquals("2.8.10", recoveredFeatures.firmwareVersion)
+            assertTrue(recoveredFeatures.supportsMonero)
+            recoveredSessionId.use { assertArrayEquals(newestSessionId, it.toByteArray()) }
+            assertEquals(
+                listOf(MessageType.MessageType_Initialize_VALUE, MessageType.MessageType_GetPublicKey_VALUE),
+                transport.writtenPackets.decodeMessages().map { it.msgType },
+            )
+        }
+
+    @Test
+    fun getPublicKeys_featuresBeforeUnrelatedResponse_throwsProtocolMismatch() = runTest(UnconfinedTestDispatcher()) {
+        val (client, transport) = clientWithRawResponses(
+            UnconfinedTestDispatcher(testScheduler),
+            sessionFeaturesResponse(),
+            sessionFeaturesResponse(),
+            MessageType.MessageType_EthereumTxRequest_VALUE to EthereumTxRequest.newBuilder().build().toByteArray(),
+        )
+
+        val error = try {
+            client.connect {
+                getPublicKeys(
+                    listOf(TrezorPublicKeyRequest.Bitcoin("Bitcoin", listOf(44, 0, 0), TrezorInputScriptType.SPENDADDRESS)),
+                )
+            }
+            error("Expected a protocol mismatch")
+        } catch (e: TrezorException) {
+            e
+        }
+
+        assertEquals("Expected PublicKey but got EthereumTxRequest", error.message)
+        assertEquals(
+            listOf(MessageType.MessageType_Initialize_VALUE, MessageType.MessageType_GetPublicKey_VALUE),
+            transport.writtenPackets.decodeMessages().map { it.msgType },
+        )
+    }
+
+    @Test
     fun getPublicKeys_bitcoinEachScriptType_sendsRequestedScriptTypeInGetPublicKey() = runTest(UnconfinedTestDispatcher()) {
         val scriptTypes = TrezorInputScriptType.entries
         val (client, transport) = clientWithResponses(
@@ -381,6 +758,8 @@ class UsbTrezorClientTest {
         assertEquals(TrezorSignature(v = 27, r = r, s = s, serializedTx = expectedSerializedTx), result)
         val sentTypes = transport.sentMessagesAfterInit().map { it.msgType }
         assertEquals(listOf(MessageType.MessageType_EthereumSignTx_VALUE), sentTypes)
+        val signRequest = EthereumSignTx.parseFrom(transport.sentMessagesAfterInit().single().payload)
+        assertFalse(signRequest.hasSupportsDefinitionRequest())
     }
 
     @Test
@@ -414,6 +793,124 @@ class UsbTrezorClientTest {
         assertEquals(TrezorSignature(v = 28, r = r, s = s, serializedTx = expectedSerializedTx), result)
         val sentTypes = transport.sentMessagesAfterInit().map { it.msgType }
         assertEquals(listOf(MessageType.MessageType_EthereumSignTxEIP1559_VALUE), sentTypes)
+        val signRequest = EthereumSignTxEIP1559.parseFrom(transport.sentMessagesAfterInit().single().payload)
+        assertFalse(signRequest.hasSupportsDefinitionRequest())
+    }
+
+    @Test
+    fun signEthereum_eip1559WithProvider_advertisesDefinitionRequests() = runTest(UnconfinedTestDispatcher()) {
+        val (client, transport) = clientWithProviderResponses(
+            UnconfinedTestDispatcher(testScheduler),
+            TrezorEthereumDefinitionsProvider { TrezorEthereumDefinitions() },
+            MessageType.MessageType_EthereumTxRequest_VALUE to signatureResponse(1, ByteArray(32) { 3 }, ByteArray(32) { 4 }),
+        )
+
+        client.connect { signEthereum(eip1559Tx()) }
+
+        val signRequest = EthereumSignTxEIP1559.parseFrom(transport.sentMessagesAfterInit().single().payload)
+        assertTrue(signRequest.hasSupportsDefinitionRequest())
+        assertTrue(signRequest.supportsDefinitionRequest)
+    }
+
+    @Test
+    fun signEthereum_definitionRequestBetweenDataChunks_preservesOffsetAndReturnsPartialDefinitions() =
+        runTest(UnconfinedTestDispatcher()) {
+            val data = ByteArray(2500) { (it % 256).toByte() }
+            val contract = ByteArray(20) { 0xab.toByte() }
+            val selector = byteArrayOf(0xa9.toByte(), 0x05, 0x9c.toByte(), 0xbb.toByte())
+            val definitionRequest = EthereumDefinitionRequest.newBuilder()
+                .setChainId(4663)
+                .setTokenAddress(ByteString.copyFrom(contract))
+                .setFuncSig(ByteString.copyFrom(selector))
+                .build()
+            var providerRequest: TrezorEthereumDefinitionRequest? = null
+            val provider = TrezorEthereumDefinitionsProvider { request ->
+                providerRequest = request
+                TrezorEthereumDefinitions(
+                    encodedNetwork = byteArrayOf(1, 2),
+                    encodedToken = byteArrayOf(3, 4),
+                )
+            }
+            val (client, transport) = clientWithProviderResponses(
+                UnconfinedTestDispatcher(testScheduler),
+                provider,
+                MessageType.MessageType_EthereumTxRequest_VALUE to
+                    EthereumTxRequest.newBuilder().setDataLength(1024).build().toByteArray(),
+                MessageType.MessageType_EthereumDefinitionRequest_VALUE to definitionRequest.toByteArray(),
+                MessageType.MessageType_EthereumTxRequest_VALUE to
+                    EthereumTxRequest.newBuilder().setDataLength(452).build().toByteArray(),
+                MessageType.MessageType_EthereumTxRequest_VALUE to
+                    signatureResponse(28, ByteArray(32) { 5 }, ByteArray(32) { 6 }),
+            )
+
+            client.connect { signEthereum(legacyTx(data)) }
+
+            assertEquals(
+                TrezorEthereumDefinitionRequest(
+                    chainId = 4663,
+                    contractAddress = "ab".repeat(20),
+                    functionSignature = "a9059cbb",
+                ),
+                providerRequest,
+            )
+            val sentMessages = transport.sentMessagesAfterInit()
+            assertEquals(
+                listOf(
+                    MessageType.MessageType_EthereumSignTx_VALUE,
+                    MessageType.MessageType_EthereumTxAck_VALUE,
+                    MessageType.MessageType_EthereumDefinitionAck_VALUE,
+                    MessageType.MessageType_EthereumTxAck_VALUE,
+                ),
+                sentMessages.map { it.msgType },
+            )
+            assertArrayEquals(data.copyOfRange(1024, 2048), EthereumTxAck.parseFrom(sentMessages[1].payload).dataChunk.toByteArray())
+            assertArrayEquals(data.copyOfRange(2048, 2500), EthereumTxAck.parseFrom(sentMessages[3].payload).dataChunk.toByteArray())
+            val definitions = EthereumDefinitionAck.parseFrom(sentMessages[2].payload).definitions
+            assertArrayEquals(byteArrayOf(1, 2), definitions.encodedNetwork.toByteArray())
+            assertArrayEquals(byteArrayOf(3, 4), definitions.encodedToken.toByteArray())
+            assertFalse(definitions.hasEncodedDisplayFormat())
+        }
+
+    @Test
+    fun signEthereum_providerFailure_sendsEmptyAckAndContinues() = runTest(UnconfinedTestDispatcher()) {
+        val request = EthereumDefinitionRequest.newBuilder()
+            .setChainId(4663)
+            .setTokenAddress(ByteString.EMPTY)
+            .build()
+        val (client, transport) = clientWithProviderResponses(
+            UnconfinedTestDispatcher(testScheduler),
+            TrezorEthereumDefinitionsProvider { throw IllegalStateException("offline") },
+            MessageType.MessageType_EthereumDefinitionRequest_VALUE to request.toByteArray(),
+            MessageType.MessageType_EthereumTxRequest_VALUE to
+                signatureResponse(27, ByteArray(32) { 1 }, ByteArray(32) { 2 }),
+        )
+
+        client.connect { signEthereum(legacyTx()) }
+
+        val ack = EthereumDefinitionAck.parseFrom(transport.sentMessagesAfterInit()[1].payload)
+        assertFalse(ack.hasDefinitions())
+    }
+
+    @Test
+    fun signEthereum_providerCancellation_propagates() = runTest(UnconfinedTestDispatcher()) {
+        val request = EthereumDefinitionRequest.newBuilder()
+            .setChainId(4663)
+            .setTokenAddress(ByteString.EMPTY)
+            .build()
+        val (client, _) = clientWithProviderResponses(
+            UnconfinedTestDispatcher(testScheduler),
+            TrezorEthereumDefinitionsProvider { throw CancellationException("cancelled") },
+            MessageType.MessageType_EthereumDefinitionRequest_VALUE to request.toByteArray(),
+        )
+
+        var caught: CancellationException? = null
+        try {
+            client.connect { signEthereum(legacyTx()) }
+        } catch (e: CancellationException) {
+            caught = e
+        }
+
+        assertTrue(caught != null)
     }
 
     @Test
@@ -574,6 +1071,314 @@ class UsbTrezorClientTest {
     }
 
     @Test
+    fun signEthereumMessage_happyPath_sendsRequestAndReturnsSignature() = runTest(UnconfinedTestDispatcher()) {
+        val signature = ByteArray(65) { it.toByte() }
+        val address = "0x1111111111111111111111111111111111111111"
+        val response = EthereumMessageSignature.newBuilder()
+            .setSignature(ByteString.copyFrom(signature))
+            .setAddress(address)
+            .build()
+        val (client, transport) = clientWithResponses(
+            UnconfinedTestDispatcher(testScheduler),
+            MessageType.MessageType_EthereumMessageSignature_VALUE to response.toByteArray(),
+        )
+        val message = "Hello Trezor".toByteArray()
+
+        val result = client.connect { signEthereumMessage(listOf(44, 60, 0, 0, 0), message) }
+
+        assertEquals(TrezorMessageSignature(signature = signature, address = address), result)
+        val sentMessages = transport.sentMessagesAfterInit()
+        assertEquals(listOf(MessageType.MessageType_EthereumSignMessage_VALUE), sentMessages.map { it.msgType })
+        val sentRequest = EthereumSignMessage.parseFrom(sentMessages[0].payload)
+        assertEquals(listOf(44, 60, 0, 0, 0), sentRequest.addressNList)
+        assertArrayEquals(message, sentRequest.message.toByteArray())
+    }
+
+    private val ethereumPath = listOf(44, 60, 0, 0, 0)
+    private val signerAddress = "0x9999999999999999999999999999999999999999"
+    private val stringType = fieldType(EthereumDataType.STRING)
+
+    private fun fieldType(dataType: EthereumDataType, size: Int? = null): EthereumFieldType =
+        EthereumFieldType.newBuilder().setDataType(dataType).apply { size?.let { setSize(it) } }.build()
+
+    private fun structMember(name: String, type: EthereumFieldType): EthereumStructMember =
+        EthereumStructMember.newBuilder().setName(name).setType(type).build()
+
+    private fun typedMembers(vararg members: Pair<String, String>) = members.map { (name, type) -> TrezorTypedMember(name, type) }
+
+    private fun typedStruct(vararg fields: Pair<String, String>) =
+        TrezorTypedValue.Struct(fields.associate { (name, value) -> name to TrezorTypedValue.Primitive(value) })
+
+    private fun structRequest(name: String): Pair<Int, ByteArray> =
+        MessageType.MessageType_EthereumTypedDataStructRequest_VALUE to
+            EthereumTypedDataStructRequest.newBuilder().setName(name).build().toByteArray()
+
+    private fun valueRequest(vararg memberPath: Int): Pair<Int, ByteArray> =
+        MessageType.MessageType_EthereumTypedDataValueRequest_VALUE to
+            EthereumTypedDataValueRequest.newBuilder().addAllMemberPath(memberPath.toList()).build().toByteArray()
+
+    private fun typedDataSignature(signature: ByteArray): Pair<Int, ByteArray> =
+        MessageType.MessageType_EthereumTypedDataSignature_VALUE to EthereumTypedDataSignature.newBuilder()
+            .setSignature(ByteString.copyFrom(signature))
+            .setAddress(signerAddress)
+            .build()
+            .toByteArray()
+
+    private fun List<DecodedMessage>.structAckMembers(index: Int) = EthereumTypedDataStructAck.parseFrom(this[index].payload).membersList
+
+    private fun List<DecodedMessage>.valueAcks(fromIndex: Int) =
+        drop(fromIndex).map { EthereumTypedDataValueAck.parseFrom(it.payload).value.toByteArray().toList() }
+
+    private val pcashStringFields = listOf(
+        "amount", "type", "recipient", "recipientExtraId", "refundAddress", "refundExtraId",
+        "fromAddress", "fromExtraId", "provider", "clientRequestId",
+    )
+
+    private fun pcashCreateExchange() = TrezorTypedData(
+        primaryType = "CreateExchange",
+        types = mapOf(
+            "EIP712Domain" to typedMembers("name" to "string", "version" to "string"),
+            "Asset" to typedMembers("coinId" to "string", "blockchain" to "string"),
+            "CreateExchange" to typedMembers("from" to "Asset", "to" to "Asset") +
+                pcashStringFields.map { TrezorTypedMember(it, "string") },
+        ),
+        domain = typedStruct("name" to "P.Cash Exchange", "version" to "1"),
+        message = TrezorTypedValue.Struct(
+            mapOf(
+                "from" to typedStruct("coinId" to "bitcoin", "blockchain" to "bitcoin"),
+                "to" to typedStruct("coinId" to "ethereum", "blockchain" to "ethereum"),
+            ) + typedStruct(
+                "amount" to "0.01",
+                "type" to "float",
+                "recipient" to "0x1234567890abcdef1234567890abcdef12345678",
+                "recipientExtraId" to "",
+                "refundAddress" to "",
+                "refundExtraId" to "",
+                "fromAddress" to "",
+                "fromExtraId" to "",
+                "provider" to "changelly",
+                "clientRequestId" to "8d3d9db0-7d1b-43ce-9431-fb530ce2c6ef",
+            ).fields,
+        ),
+    )
+
+    /** Typed data whose message is a single member `value` of [type]; the domain is left out of `types`. */
+    private fun singleMemberTypedData(type: String, value: TrezorTypedValue) = TrezorTypedData(
+        primaryType = "Mail",
+        types = mapOf("Mail" to typedMembers("value" to type)),
+        domain = TrezorTypedValue.Struct(emptyMap()),
+        message = TrezorTypedValue.Struct(mapOf("value" to value)),
+    )
+
+    private fun assertTypedDataRejectedBeforeDeviceMessages(data: TrezorTypedData) = runTest(UnconfinedTestDispatcher()) {
+        val (client, transport) = clientWithResponses(UnconfinedTestDispatcher(testScheduler))
+
+        assertSuspendThrows<IllegalArgumentException> { client.connect { signEthereumTypedData(ethereumPath, data) } }
+
+        assertEquals(0, transport.sentMessagesAfterInit().size)
+    }
+
+    @Test
+    fun signEthereumTypedData_pcashCreateExchange_streamsTypesAndValuesAndReturnsSignature() = runTest(UnconfinedTestDispatcher()) {
+        val signature = ByteArray(65) { it.toByte() }
+        val (client, transport) = clientWithResponses(
+            UnconfinedTestDispatcher(testScheduler),
+            structRequest("EIP712Domain"),
+            structRequest("CreateExchange"),
+            structRequest("Asset"),
+            valueRequest(0, 0),
+            valueRequest(1, 0, 1),
+            valueRequest(1, 1, 0),
+            valueRequest(1, 5),
+            typedDataSignature(signature),
+        )
+
+        val result = client.connect { signEthereumTypedData(ethereumPath, pcashCreateExchange()) }
+
+        assertEquals(TrezorMessageSignature(signature = signature, address = signerAddress), result)
+        val sent = transport.sentMessagesAfterInit()
+        val structAck = MessageType.MessageType_EthereumTypedDataStructAck_VALUE
+        val valueAck = MessageType.MessageType_EthereumTypedDataValueAck_VALUE
+        assertEquals(
+            listOf(MessageType.MessageType_EthereumSignTypedData_VALUE, structAck, structAck, structAck) + List(4) { valueAck },
+            sent.map { it.msgType },
+        )
+        val request = EthereumSignTypedData.parseFrom(sent[0].payload)
+        assertEquals(ethereumPath, request.addressNList)
+        assertEquals("CreateExchange", request.primaryType)
+        assertTrue(request.hasMetamaskV4Compat() && request.metamaskV4Compat)
+        assertEquals(listOf(structMember("name", stringType), structMember("version", stringType)), sent.structAckMembers(1))
+        val assetType = EthereumFieldType.newBuilder()
+            .setDataType(EthereumDataType.STRUCT)
+            .setStructName("Asset")
+            .setSize(2)
+            .build()
+        assertEquals(
+            listOf(structMember("from", assetType), structMember("to", assetType)) +
+                pcashStringFields.map { structMember(it, stringType) },
+            sent.structAckMembers(2),
+        )
+        assertEquals(listOf(structMember("coinId", stringType), structMember("blockchain", stringType)), sent.structAckMembers(3))
+        assertEquals(
+            listOf("P.Cash Exchange", "bitcoin", "ethereum", "").map { it.toByteArray().toList() },
+            sent.valueAcks(fromIndex = 4),
+        )
+    }
+
+    @Test
+    fun signEthereumTypedData_arrayAndAtomicTypes_encodesLikeTrezorlib() = runTest(UnconfinedTestDispatcher()) {
+        val owner = ByteArray(20) { (it + 1).toByte() }
+        val data = TrezorTypedData(
+            primaryType = "Mail",
+            types = mapOf(
+                "Mail" to typedMembers(
+                    "tags" to "string[]",
+                    "amount" to "uint256",
+                    "nonce" to "uint16",
+                    "delta" to "int8",
+                    "owner" to "address",
+                    "ok" to "bool",
+                ),
+            ),
+            domain = TrezorTypedValue.Struct(emptyMap()),
+            message = TrezorTypedValue.Struct(
+                mapOf(
+                    "tags" to TrezorTypedValue.Array(listOf(TrezorTypedValue.Primitive("a"), TrezorTypedValue.Primitive("bc"))),
+                ) + typedStruct(
+                    "amount" to "256",
+                    "nonce" to "0x0102",
+                    "delta" to "-128",
+                    "owner" to "0x" + owner.toHex(),
+                    "ok" to "true",
+                ).fields,
+            ),
+        )
+        val (client, transport) = clientWithResponses(
+            UnconfinedTestDispatcher(testScheduler),
+            structRequest("EIP712Domain"),
+            structRequest("Mail"),
+            *(listOf(intArrayOf(1, 0), intArrayOf(1, 0, 0), intArrayOf(1, 0, 1)) + (1..5).map { intArrayOf(1, it) })
+                .map { valueRequest(*it) }
+                .toTypedArray(),
+            typedDataSignature(ByteArray(65)),
+        )
+
+        client.connect { signEthereumTypedData(ethereumPath, data) }
+
+        val sent = transport.sentMessagesAfterInit()
+        assertEquals(emptyList<EthereumStructMember>(), sent.structAckMembers(1))
+        assertEquals(
+            listOf(
+                structMember(
+                    "tags",
+                    EthereumFieldType.newBuilder().setDataType(EthereumDataType.ARRAY).setEntryType(stringType).build(),
+                ),
+                structMember("amount", fieldType(EthereumDataType.UINT, 32)),
+                structMember("nonce", fieldType(EthereumDataType.UINT, 2)),
+                structMember("delta", fieldType(EthereumDataType.INT, 1)),
+                structMember("owner", fieldType(EthereumDataType.ADDRESS)),
+                structMember("ok", fieldType(EthereumDataType.BOOL)),
+            ),
+            sent.structAckMembers(2),
+        )
+        val expectedValues = listOf(
+            byteArrayOf(0, 2),
+            "a".toByteArray(),
+            "bc".toByteArray(),
+            ByteArray(32).also { it[30] = 1 },
+            byteArrayOf(1, 2),
+            byteArrayOf(0x80.toByte()),
+            owner,
+            byteArrayOf(1),
+        )
+        assertEquals(expectedValues.map { it.toList() }, sent.valueAcks(fromIndex = 3))
+    }
+
+    @Test
+    fun signEthereumTypedData_domainOnlyWithEmptyMessage_signsDomainValues() = runTest(UnconfinedTestDispatcher()) {
+        val signature = ByteArray(65) { 3 }
+        val data = pcashCreateExchange().copy(primaryType = "EIP712Domain", message = TrezorTypedValue.Struct(emptyMap()))
+        val (client, transport) = clientWithResponses(
+            UnconfinedTestDispatcher(testScheduler),
+            structRequest("EIP712Domain"),
+            valueRequest(0, 0),
+            valueRequest(0, 1),
+            typedDataSignature(signature),
+        )
+
+        val result = client.connect { signEthereumTypedData(ethereumPath, data) }
+
+        assertEquals(TrezorMessageSignature(signature = signature, address = signerAddress), result)
+        val sent = transport.sentMessagesAfterInit()
+        assertEquals("EIP712Domain", EthereumSignTypedData.parseFrom(sent[0].payload).primaryType)
+        assertEquals(listOf("P.Cash Exchange", "1").map { it.toByteArray().toList() }, sent.valueAcks(fromIndex = 2))
+    }
+
+    @Test
+    fun signEthereumTypedData_unsupportedType_throwsBeforeDeviceMessages() {
+        listOf("float", "Unknown", "uint7", "uint264", "bytes33", "string[][]").forEach { type ->
+            assertTypedDataRejectedBeforeDeviceMessages(singleMemberTypedData(type, TrezorTypedValue.Primitive("1")))
+        }
+    }
+
+    @Test
+    fun signEthereumTypedData_invalidValue_throwsBeforeDeviceMessages() {
+        listOf(
+            "int8" to TrezorTypedValue.Primitive("128"),
+            "uint8" to TrezorTypedValue.Primitive("-1"),
+            "uint8" to TrezorTypedValue.Primitive("1e3"),
+            "bool" to TrezorTypedValue.Primitive("1"),
+            "address" to TrezorTypedValue.Primitive("0x1234"),
+            "bytes2" to TrezorTypedValue.Primitive("0x123"),
+            "string" to TrezorTypedValue.Array(emptyList()),
+            "uint8[2]" to TrezorTypedValue.Array(listOf(TrezorTypedValue.Primitive("1"))),
+        ).forEach { (type, value) ->
+            assertTypedDataRejectedBeforeDeviceMessages(singleMemberTypedData(type, value))
+        }
+    }
+
+    @Test
+    fun signEthereumTypedData_deviceCancels_throwsTrezorCancelledException() = runTest(UnconfinedTestDispatcher()) {
+        val failure = Failure.newBuilder().setCode(Failure.FailureType.Failure_ActionCancelled).setMessage("Cancelled").build()
+        val (client, _) = clientWithResponses(
+            UnconfinedTestDispatcher(testScheduler),
+            structRequest("EIP712Domain"),
+            MessageType.MessageType_Failure_VALUE to failure.toByteArray(),
+        )
+
+        assertSuspendThrows<TrezorCancelledException> {
+            client.connect { signEthereumTypedData(ethereumPath, pcashCreateExchange()) }
+        }
+    }
+
+    @Test
+    fun signEthereumTypedHash_withMessageHash_sendsBothHashesAndReturnsSignature() = runTest(UnconfinedTestDispatcher()) {
+        val signature = ByteArray(65) { 7 }
+        val domainHash = ByteArray(32) { 1 }
+        val messageHash = ByteArray(32) { 2 }
+        val (client, transport) = clientWithResponses(UnconfinedTestDispatcher(testScheduler), typedDataSignature(signature))
+
+        val result = client.connect { signEthereumTypedHash(ethereumPath, domainHash, messageHash) }
+
+        assertEquals(TrezorMessageSignature(signature = signature, address = signerAddress), result)
+        val sent = transport.sentMessagesAfterInit()
+        assertEquals(listOf(MessageType.MessageType_EthereumSignTypedHash_VALUE), sent.map { it.msgType })
+        val request = EthereumSignTypedHash.parseFrom(sent[0].payload)
+        assertEquals(ethereumPath, request.addressNList)
+        assertArrayEquals(domainHash, request.domainSeparatorHash.toByteArray())
+        assertArrayEquals(messageHash, request.messageHash.toByteArray())
+    }
+
+    @Test
+    fun signEthereumTypedHash_domainOnly_omitsMessageHash() = runTest(UnconfinedTestDispatcher()) {
+        val (client, transport) = clientWithResponses(UnconfinedTestDispatcher(testScheduler), typedDataSignature(ByteArray(65)))
+
+        client.connect { signEthereumTypedHash(ethereumPath, ByteArray(32) { 1 }, messageHash = null) }
+
+        assertFalse(EthereumSignTypedHash.parseFrom(transport.sentMessagesAfterInit()[0].payload).hasMessageHash())
+    }
+
+    @Test
     fun signBitcoin_segwitInputWithPrevTxAndTwoOutputs_sendsAcksInOrderAndAssemblesResult() = runTest(UnconfinedTestDispatcher()) {
         val input = segwitInput()
         val prev = prevTx()
@@ -729,6 +1534,137 @@ class UsbTrezorClientTest {
     }
 
     @Test
+    fun signBitcoin_deviceReportsSignatureIndexOutsideInputRange_throwsMappingFailure() = runTest(UnconfinedTestDispatcher()) {
+        val tx = TrezorBtcSignTx(version = 1, lockTime = 0, inputs = listOf(legacyInput()), outputs = listOf(addressOutput()))
+        val (client, _) = clientWithResponses(
+            UnconfinedTestDispatcher(testScheduler),
+            MessageType.MessageType_TxRequest_VALUE to txRequest(RequestType.TXINPUT, requestIndex = 0),
+            MessageType.MessageType_TxRequest_VALUE to txRequest(RequestType.TXOUTPUT, requestIndex = 0),
+            MessageType.MessageType_TxRequest_VALUE to
+                txRequestFinished(signatureIndex = 1, signature = ByteArray(64) { 1 }, serializedTx = ByteArray(4) { 2 }),
+        )
+
+        assertSignatureMappingFailure { client.connect { signBitcoin("Bitcoin", tx, emptyMap()) } }
+    }
+
+    @Test
+    fun signBitcoin_deviceRepeatsSignatureIndex_throwsMappingFailure() = runTest(UnconfinedTestDispatcher()) {
+        // A single input leaves the duplicate guard as the only one that can fire: index 0 is in
+        // range and its slot is filled, so neither the range nor the missing-slot guard applies.
+        val tx = TrezorBtcSignTx(version = 1, lockTime = 0, inputs = listOf(legacyInput()), outputs = listOf(addressOutput()))
+        val (client, _) = clientWithResponses(
+            UnconfinedTestDispatcher(testScheduler),
+            MessageType.MessageType_TxRequest_VALUE to txRequest(RequestType.TXINPUT, requestIndex = 0),
+            MessageType.MessageType_TxRequest_VALUE to
+                txRequest(RequestType.TXOUTPUT, requestIndex = 0, signatureIndex = 0, signature = ByteArray(64) { 1 }),
+            MessageType.MessageType_TxRequest_VALUE to
+                txRequestFinished(signatureIndex = 0, signature = ByteArray(64) { 3 }, serializedTx = ByteArray(4) { 2 }),
+        )
+
+        assertSignatureMappingFailure { client.connect { signBitcoin("Bitcoin", tx, emptyMap()) } }
+    }
+
+    @Test
+    fun signBitcoin_deviceSendsSignatureWithoutIndex_throwsMappingFailure() = runTest(UnconfinedTestDispatcher()) {
+        val tx = TrezorBtcSignTx(version = 1, lockTime = 0, inputs = listOf(legacyInput()), outputs = listOf(addressOutput()))
+        val unindexedSignature = txRequest(RequestType.TXFINISHED, signature = ByteArray(64) { 1 })
+        val (client, _) = clientWithResponses(
+            UnconfinedTestDispatcher(testScheduler),
+            MessageType.MessageType_TxRequest_VALUE to txRequest(RequestType.TXINPUT, requestIndex = 0),
+            MessageType.MessageType_TxRequest_VALUE to txRequest(RequestType.TXOUTPUT, requestIndex = 0),
+            // An unindexed signature must not be credited to input 0 by the proto's default index.
+            MessageType.MessageType_TxRequest_VALUE to unindexedSignature,
+        )
+
+        // A helper that dropped the signature here would leave the frame empty and the test vacuous.
+        assertTrue(TxRequest.parseFrom(unindexedSignature).serialized.hasSignature())
+        assertSignatureMappingFailure { client.connect { signBitcoin("Bitcoin", tx, emptyMap()) } }
+    }
+
+    @Test
+    fun signBitcoin_deviceLeavesAnInputUnsigned_throwsMappingFailure() = runTest(UnconfinedTestDispatcher()) {
+        val tx = TrezorBtcSignTx(
+            version = 1,
+            lockTime = 0,
+            inputs = listOf(legacyInput(), segwitInput()),
+            outputs = listOf(addressOutput()),
+        )
+        val (client, _) = clientWithResponses(
+            UnconfinedTestDispatcher(testScheduler),
+            MessageType.MessageType_TxRequest_VALUE to txRequest(RequestType.TXINPUT, requestIndex = 0),
+            MessageType.MessageType_TxRequest_VALUE to txRequest(RequestType.TXINPUT, requestIndex = 1),
+            MessageType.MessageType_TxRequest_VALUE to txRequest(RequestType.TXOUTPUT, requestIndex = 0),
+            MessageType.MessageType_TxRequest_VALUE to
+                txRequestFinished(signatureIndex = 0, signature = ByteArray(64) { 1 }, serializedTx = ByteArray(4) { 2 }),
+        )
+
+        assertSignatureMappingFailure { client.connect { signBitcoin("Bitcoin", tx, emptyMap()) } }
+    }
+
+    @Test
+    fun signBitcoin_zcashTransaction_sendsV5ConsensusFieldsWithoutOverwintered() = runTest(UnconfinedTestDispatcher()) {
+        val tx = TrezorBtcSignTx(
+            version = 5,
+            lockTime = 0,
+            inputs = listOf(legacyInput()),
+            outputs = listOf(addressOutput()),
+            expiry = 2_500_000L,
+            versionGroupId = 0x26A7270AL,
+            branchId = 0xC2D6D0B4L,
+        )
+        val (client, transport) = clientWithResponses(
+            UnconfinedTestDispatcher(testScheduler),
+            MessageType.MessageType_TxRequest_VALUE to txRequest(RequestType.TXINPUT, requestIndex = 0),
+            MessageType.MessageType_TxRequest_VALUE to txRequest(RequestType.TXOUTPUT, requestIndex = 0),
+            MessageType.MessageType_TxRequest_VALUE to
+                txRequestFinished(signatureIndex = 0, signature = ByteArray(64) { 1 }, serializedTx = ByteArray(4) { 2 }),
+        )
+
+        // An empty prevTxByHash proves v5 signing never asks for a previous transaction.
+        client.connect { signBitcoin("Zcash", tx, emptyMap()) }
+
+        val signTx = SignTx.parseFrom(transport.sentMessagesAfterInit()[0].payload)
+        // coin_name and version carry proto defaults of 'Bitcoin' and 1, so an unset field would
+        // otherwise read as a valid Bitcoin envelope.
+        assertEquals("Zcash", signTx.coinName)
+        assertEquals(5, signTx.version)
+        assertEquals(2_500_000, signTx.expiry)
+        assertEquals(0x26A7270AL.toInt(), signTx.versionGroupId)
+        // The NU5 branch id does not fit a signed Int - it must survive as the same uint32 bit pattern.
+        assertEquals(0xC2D6D0B4L.toInt(), signTx.branchId)
+        assertFalse(signTx.hasOverwintered())
+    }
+
+    @Test
+    fun signBitcoin_bitcoinTransaction_omitsZcashConsensusFields() = runTest(UnconfinedTestDispatcher()) {
+        val tx = TrezorBtcSignTx(version = 1, lockTime = 0, inputs = listOf(legacyInput()), outputs = listOf(addressOutput()))
+        val (client, transport) = clientWithResponses(
+            UnconfinedTestDispatcher(testScheduler),
+            MessageType.MessageType_TxRequest_VALUE to txRequest(RequestType.TXINPUT, requestIndex = 0),
+            MessageType.MessageType_TxRequest_VALUE to txRequest(RequestType.TXOUTPUT, requestIndex = 0),
+            MessageType.MessageType_TxRequest_VALUE to
+                txRequestFinished(signatureIndex = 0, signature = ByteArray(64) { 1 }, serializedTx = ByteArray(4) { 2 }),
+        )
+
+        client.connect { signBitcoin("Bitcoin", tx, emptyMap()) }
+
+        val signTx = SignTx.parseFrom(transport.sentMessagesAfterInit()[0].payload)
+        assertFalse(signTx.hasExpiry())
+        assertFalse(signTx.hasVersionGroupId())
+        assertFalse(signTx.hasBranchId())
+    }
+
+    private suspend fun assertSignatureMappingFailure(block: suspend () -> Unit) {
+        var caught: Exception? = null
+        try {
+            block()
+        } catch (e: Exception) {
+            caught = e
+        }
+        assertTrue("expected TrezorSignatureMappingException but was $caught", caught is TrezorSignatureMappingException)
+    }
+
+    @Test
     fun signSolana_happyPath_sendsSignTxAndReturnsSignature() = runTest(UnconfinedTestDispatcher()) {
         val serializedTx = ByteArray(16) { it.toByte() }
         val signature = ByteArray(64) { 9 }
@@ -864,5 +1800,201 @@ class UsbTrezorClientTest {
         assertEquals(createAccount.destination, createAccountOp.newAccount)
         assertEquals(createAccount.startingBalance, createAccountOp.startingBalance)
         assertEquals(false, createAccountOp.hasSourceAccount())
+    }
+
+    private val tronPath = listOf(44, 195, 0, 0, 0)
+
+    private fun tronTransferContract(): TronTransferContract = TronTransferContract.newBuilder()
+        .setOwnerAddress(ByteString.copyFrom(ByteArray(21) { 0x41 }))
+        .setToAddress(ByteString.copyFrom(ByteArray(21) { 0x42 }))
+        .setAmount(1_000_000L)
+        .build()
+
+    private fun tronRawContract(type: TronRawContract.TronRawContractType, parameterValue: ByteString): TronRawContract =
+        TronRawContract.newBuilder()
+            .setType(type)
+            .setParameter(
+                TronRawContract.TronRawParameter.newBuilder()
+                    .setTypeUrl("type.googleapis.com/protocol.${type.name}")
+                    .setValue(parameterValue),
+            )
+            .build()
+
+    private fun tronRawTransaction(
+        vararg contracts: TronRawContract,
+        data: ByteString? = null,
+        feeLimit: Long? = null,
+    ): ByteArray = TronRawTransaction.newBuilder()
+        .setRefBlockBytes(ByteString.copyFrom(byteArrayOf(0x1a, 0x2b)))
+        .setRefBlockHash(ByteString.copyFrom(ByteArray(8) { 7 }))
+        .setExpiration(1_700_000_060_000L)
+        .apply {
+            contracts.forEach { addContract(it) }
+            if (data != null) setData(data)
+            if (feeLimit != null) setFeeLimit(feeLimit)
+        }
+        .setTimestamp(1_700_000_000_000L)
+        .build()
+        .toByteArray()
+
+    private fun tronSignatureResponse(signature: ByteArray): Pair<Int, ByteArray> =
+        MessageType.MessageType_TronSignature_VALUE to
+            TronSignature.newBuilder().setSignature(ByteString.copyFrom(signature)).build().toByteArray()
+
+    private fun tronContractRequestResponse(): Pair<Int, ByteArray> =
+        MessageType.MessageType_TronContractRequest_VALUE to TronContractRequest.newBuilder().build().toByteArray()
+
+    /** Asserts signTron rejects [rawData] with nothing but the session-opening Initialize on the wire. */
+    private fun assertSignTronThrowsBeforeTronMessages(rawData: ByteArray) = runTest(UnconfinedTestDispatcher()) {
+        val (client, transport) = clientWithResponses(UnconfinedTestDispatcher(testScheduler))
+
+        var caught: TrezorException? = null
+        try {
+            client.connect { signTron(tronPath, rawData) }
+        } catch (e: TrezorException) {
+            caught = e
+        }
+
+        assertTrue(caught != null)
+        assertEquals(0, transport.sentMessagesAfterInit().size)
+    }
+
+    @Test
+    fun signTron_transferContract_sendsSignTxThenContractAndReturnsSignature() = runTest(UnconfinedTestDispatcher()) {
+        val transfer = tronTransferContract()
+        val rawData = tronRawTransaction(
+            tronRawContract(TronRawContract.TronRawContractType.TransferContract, transfer.toByteString()),
+        )
+        val signature = ByteArray(65) { 3 }
+        val (client, transport) = clientWithResponses(
+            UnconfinedTestDispatcher(testScheduler),
+            tronContractRequestResponse(),
+            tronSignatureResponse(signature),
+        )
+
+        val result = client.connect { signTron(tronPath, rawData) }
+
+        assertArrayEquals(signature, result)
+        val sentMessages = transport.sentMessagesAfterInit()
+        assertEquals(
+            listOf(MessageType.MessageType_TronSignTx_VALUE, MessageType.MessageType_TronTransferContract_VALUE),
+            sentMessages.map { it.msgType },
+        )
+        val signTx = TronSignTx.parseFrom(sentMessages[0].payload)
+        assertEquals(tronPath, signTx.addressNList)
+        assertArrayEquals(byteArrayOf(0x1a, 0x2b), signTx.refBlockBytes.toByteArray())
+        assertArrayEquals(ByteArray(8) { 7 }, signTx.refBlockHash.toByteArray())
+        assertEquals(1_700_000_060_000L, signTx.expiration)
+        assertEquals(1_700_000_000_000L, signTx.timestamp)
+        assertEquals(false, signTx.hasData())
+        assertEquals(false, signTx.hasFeeLimit())
+        assertEquals(transfer, TronTransferContract.parseFrom(sentMessages[1].payload))
+    }
+
+    @Test
+    fun signTron_triggerSmartContract_passesFeeLimitAndData() = runTest(UnconfinedTestDispatcher()) {
+        val trigger = TronTriggerSmartContract.newBuilder()
+            .setOwnerAddress(ByteString.copyFrom(ByteArray(21) { 0x41 }))
+            .setContractAddress(ByteString.copyFrom(ByteArray(21) { 0x43 }))
+            .setData(ByteString.copyFrom(ByteArray(68) { 5 }))
+            .build()
+        val memo = ByteString.copyFromUtf8("memo")
+        val rawData = tronRawTransaction(
+            tronRawContract(TronRawContract.TronRawContractType.TriggerSmartContract, trigger.toByteString()),
+            data = memo,
+            feeLimit = 100_000_000L,
+        )
+        val signature = ByteArray(65) { 4 }
+        val (client, transport) = clientWithResponses(
+            UnconfinedTestDispatcher(testScheduler),
+            tronContractRequestResponse(),
+            tronSignatureResponse(signature),
+        )
+
+        val result = client.connect { signTron(tronPath, rawData) }
+
+        assertArrayEquals(signature, result)
+        val sentMessages = transport.sentMessagesAfterInit()
+        assertEquals(
+            listOf(MessageType.MessageType_TronSignTx_VALUE, MessageType.MessageType_TronTriggerSmartContract_VALUE),
+            sentMessages.map { it.msgType },
+        )
+        val signTx = TronSignTx.parseFrom(sentMessages[0].payload)
+        assertEquals(100_000_000L, signTx.feeLimit)
+        assertArrayEquals(memo.toByteArray(), signTx.data.toByteArray())
+        assertEquals(trigger, TronTriggerSmartContract.parseFrom(sentMessages[1].payload))
+    }
+
+    @Test
+    fun signTron_unsupportedContractType_throwsBeforeTronMessages() {
+        val freeze = TronFreezeBalanceV2Contract.newBuilder()
+            .setOwnerAddress(ByteString.copyFrom(ByteArray(21) { 0x41 }))
+            .setBalance(1_000_000L)
+            .build()
+        assertSignTronThrowsBeforeTronMessages(
+            tronRawTransaction(
+                tronRawContract(TronRawContract.TronRawContractType.FreezeBalanceV2Contract, freeze.toByteString()),
+            ),
+        )
+    }
+
+    @Test
+    fun signTron_triggerWithCallValue_throwsBeforeTronMessages() {
+        val trigger = TronTriggerSmartContract.newBuilder()
+            .setOwnerAddress(ByteString.copyFrom(ByteArray(21) { 0x41 }))
+            .setContractAddress(ByteString.copyFrom(ByteArray(21) { 0x43 }))
+            .setData(ByteString.copyFrom(ByteArray(68) { 5 }))
+            .build()
+        // call_value is field 3 (varint) of Tron's real TriggerSmartContract - unknown to the Trezor protocol
+        val withCallValue = trigger.toByteString().concat(ByteString.copyFrom(byteArrayOf(0x18, 0x01)))
+        assertSignTronThrowsBeforeTronMessages(
+            tronRawTransaction(
+                tronRawContract(TronRawContract.TronRawContractType.TriggerSmartContract, withCallValue),
+            ),
+        )
+    }
+
+    @Test
+    fun signTron_unknownOuterField_throwsBeforeTronMessages() {
+        val valid = tronRawTransaction(
+            tronRawContract(TronRawContract.TronRawContractType.TransferContract, tronTransferContract().toByteString()),
+        )
+        // ref_block_num is field 3 (varint) of Tron's real raw transaction - unknown to the Trezor protocol
+        assertSignTronThrowsBeforeTronMessages(valid + byteArrayOf(0x18, 0x05))
+    }
+
+    @Test
+    fun signTron_multipleContracts_throwsBeforeTronMessages() {
+        val contract = tronRawContract(TronRawContract.TronRawContractType.TransferContract, tronTransferContract().toByteString())
+        assertSignTronThrowsBeforeTronMessages(tronRawTransaction(contract, contract))
+    }
+
+    @Test
+    fun getPublicKeys_tron_returnsAddressFromDevice() = runTest(UnconfinedTestDispatcher()) {
+        val tronAddress = TronAddress.newBuilder().setAddress("TTronAddressBase58").build()
+        val (client, transport) = clientWithResponses(
+            UnconfinedTestDispatcher(testScheduler),
+            MessageType.MessageType_TronAddress_VALUE to tronAddress.toByteArray(),
+        )
+
+        val result = client.connect { getPublicKeys(listOf(TrezorPublicKeyRequest.Tron(path = tronPath))) }
+
+        assertEquals(1, result.size)
+        assertEquals("TTronAddressBase58", result[0].key)
+        assertArrayEquals(ByteArray(0), result[0].publicKey)
+        assertArrayEquals(ByteArray(0), result[0].chainCode)
+        val sentMessages = transport.sentMessagesAfterInit()
+        assertEquals(listOf(MessageType.MessageType_TronGetAddress_VALUE), sentMessages.map { it.msgType })
+        assertEquals(tronPath, TronGetAddress.parseFrom(sentMessages[0].payload).addressNList)
+    }
+
+    @Test
+    fun trezorBtcSignTx_zcashFieldsAdded_keepsPreZcashJvmConstructor() {
+        TrezorBtcSignTx::class.java.getConstructor(
+            Int::class.javaPrimitiveType,
+            Long::class.javaPrimitiveType,
+            List::class.java,
+            List::class.java,
+        )
     }
 }

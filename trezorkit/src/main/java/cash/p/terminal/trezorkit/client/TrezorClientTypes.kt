@@ -4,15 +4,70 @@ package cash.p.terminal.trezorkit.client
  * Neutral, protobuf-free snapshot of a Trezor device's `Features` response.
  *
  * [firmwareVersion] is assembled as `"major.minor.patch"`.
+ * [supportsTron] reflects the device's `Capability_Tron` (Tron signing landed in core firmware 2.11.0);
+ * older firmware rejects Tron messages, so callers must not request Tron derivation when it is false.
+ * [supportsMonero] reflects the independent `Capability_Monero` firmware predicate.
+ * [supportsZcash] combines `Capability_Bitcoin_like` - the only reported field that tells a
+ * universal build from a Bitcoin-only one - with the firmware version that introduced tx v5.
  */
-data class TrezorFeatures(
+data class TrezorFeatures @JvmOverloads constructor(
     val deviceId: String?,
     val model: String?,
     val internalModel: String?,
     val firmwareVersion: String,
     val passphraseProtection: Boolean,
     val initialized: Boolean = true,
-)
+    val supportsTron: Boolean = false,
+    val supportsMonero: Boolean = false,
+    val supportsZcash: Boolean = false,
+    val unlocked: Boolean = false,
+) {
+
+    /**
+     * Lets a different protocol client resume this exact unlocked device session.
+     * Ownership remains with the client session until [takeSessionId] transfers it.
+     */
+    var sessionId: TrezorSessionId? = null
+        internal set
+
+    /**
+     * Transfers ownership of the resumable session ID to another protocol client.
+     * The caller must close the returned handle immediately after copying it.
+     */
+    @Synchronized
+    fun takeSessionId(): TrezorSessionId? =
+        sessionId.also { sessionId = null }
+
+    @Synchronized
+    internal fun closeSession() {
+        sessionId?.close()
+        sessionId = null
+    }
+}
+
+/** Protobuf-free, explicitly destroyable Trezor session identifier. */
+class TrezorSessionId(value: ByteArray) : AutoCloseable {
+    private val bytes = value.copyOf()
+    private var closed = false
+
+    init {
+        require(bytes.isNotEmpty()) { "Trezor session ID must not be empty" }
+    }
+
+    @Synchronized
+    fun toByteArray(): ByteArray {
+        check(!closed) { "Trezor session ID is closed" }
+        return bytes.copyOf()
+    }
+
+    override fun toString(): String = "TrezorSessionId([redacted])"
+
+    @Synchronized
+    override fun close() {
+        bytes.fill(0)
+        closed = true
+    }
+}
 
 /** One key/address derivation request, batched together in a single [TrezorClientSession.getPublicKeys] call. */
 sealed interface TrezorPublicKeyRequest {
@@ -20,12 +75,13 @@ sealed interface TrezorPublicKeyRequest {
     data class Ethereum(val path: List<Int>) : TrezorPublicKeyRequest
     data class Solana(val path: List<Int>) : TrezorPublicKeyRequest
     data class Stellar(val path: List<Int>) : TrezorPublicKeyRequest
+    data class Tron(val path: List<Int>) : TrezorPublicKeyRequest
 }
 
 /**
  * Uniform result of one [TrezorPublicKeyRequest]. [key]'s meaning depends on the request type:
- * xpub for Bitcoin/Ethereum, hex-encoded public key for Solana, address for Stellar.
- * [chainCode] is empty for Solana/Stellar - neither has a BIP-32 chain code.
+ * xpub for Bitcoin/Ethereum, hex-encoded public key for Solana, address for Stellar/Tron.
+ * [chainCode] is empty for Solana/Stellar/Tron - none of them has a BIP-32 chain code.
  */
 data class TrezorKeyResult(
     val key: String,
@@ -114,6 +170,17 @@ data class TrezorEvmTx(
         result = 31 * result + gasFee.hashCode()
         return result
     }
+}
+
+/** Result of signing an EIP-191 message or EIP-712 typed data on-device: the raw signature and the signing address. */
+data class TrezorMessageSignature(val signature: ByteArray, val address: String) {
+    override fun equals(other: Any?): Boolean {
+        if (this === other) return true
+        if (other !is TrezorMessageSignature) return false
+        return signature.contentEquals(other.signature) && address == other.address
+    }
+
+    override fun hashCode(): Int = 31 * signature.contentHashCode() + address.hashCode()
 }
 
 /**
@@ -224,12 +291,18 @@ sealed class TrezorBtcOutput {
     }
 }
 
-/** An unsigned Bitcoin transaction to sign on-device. */
-data class TrezorBtcSignTx(
+/**
+ * An unsigned Bitcoin transaction to sign on-device. [expiry], [versionGroupId] and [branchId]
+ * belong to Zcash tx v5 consensus branches and stay null for every other coin.
+ */
+data class TrezorBtcSignTx @JvmOverloads constructor(
     val version: Int,
     val lockTime: Long,
     val inputs: List<TrezorBtcInput>,
     val outputs: List<TrezorBtcOutput>,
+    val expiry: Long? = null,
+    val versionGroupId: Long? = null,
+    val branchId: Long? = null,
 )
 
 /** One input of a previous transaction, supplied by the caller so the device can verify the UTXO being spent. */

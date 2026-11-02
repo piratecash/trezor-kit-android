@@ -19,6 +19,18 @@ interface TrezorClientSession {
     /** Signs an EVM transaction on-device, streaming [TrezorEvmTx.data] in chunks as requested. */
     suspend fun signEthereum(tx: TrezorEvmTx): TrezorSignature
 
+    /** Signs an EIP-191 personal message on-device (ethereumSignMessage) and returns signature + address. */
+    suspend fun signEthereumMessage(addressN: List<Int>, message: ByteArray): TrezorMessageSignature
+
+    /** Signs EIP-712 typed data on-device (MetaMask v4 compatible), streaming types and values as requested. */
+    suspend fun signEthereumTypedData(addressN: List<Int>, data: TrezorTypedData): TrezorMessageSignature
+
+    /**
+     * Signs EIP-712 typed data given as its pre-computed hashes, for devices without on-device parsing.
+     * [messageHash] is null for domain-only data.
+     */
+    suspend fun signEthereumTypedHash(addressN: List<Int>, domainSeparatorHash: ByteArray, messageHash: ByteArray?): TrezorMessageSignature
+
     /**
      * Signs a Bitcoin transaction on-device, streaming input/output/previous-transaction
      * details as the device requests them.
@@ -34,4 +46,14 @@ interface TrezorClientSession {
 
     /** Signs a Stellar transaction on-device, streaming its operations one by one, and returns the raw signature. */
     suspend fun signStellar(tx: TrezorStellarSignTx): ByteArray
+
+    /**
+     * Signs a Tron transaction on-device and returns the raw 65-byte `r || s || v` signature.
+     *
+     * @param rawData the serialized `raw_data` of the transaction - the exact bytes the
+     *   network will hash. The device re-serializes the transaction itself from the forwarded
+     *   fields, so if [rawData] contains anything the Trezor protocol cannot represent, this
+     *   fails without sending any Tron message to the device.
+     */
+    suspend fun signTron(addressN: List<Int>, rawData: ByteArray): ByteArray
 }
