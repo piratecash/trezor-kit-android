@@ -18,6 +18,8 @@ class FakeTrezorTransport(
 
     private var readIndex = 0
 
+    val unreadPacketCount: Int get() = responses.size - readIndex
+
     override suspend fun open() = Unit
     override fun close() = Unit
 

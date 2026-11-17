@@ -16,6 +16,7 @@ Files in this directory are copied verbatim from the Trezor firmware repository:
 - `messages-ethereum.proto` — Ethereum messages
 - `messages-solana.proto` — Solana messages
 - `messages-stellar.proto` — Stellar messages
+- `messages-tron.proto` — Tron messages
 - `options.proto` — custom wire options (`wire_in`/`wire_out`/etc.) used by the files above
 
 Files for unrelated coins/features (Monero, Cardano, EOS, NEM, Tezos, Ripple, Binance, Lisk,
