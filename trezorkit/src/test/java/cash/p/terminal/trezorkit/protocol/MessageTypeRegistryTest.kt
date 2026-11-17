@@ -8,6 +8,8 @@ import com.satoshilabs.trezor.lib.protobuf.TrezorMessageCommon.HDNodeType
 import com.satoshilabs.trezor.lib.protobuf.TrezorMessageEthereum.EthereumDefinitionAck
 import com.satoshilabs.trezor.lib.protobuf.TrezorMessageEthereum.EthereumDefinitionRequest
 import com.satoshilabs.trezor.lib.protobuf.TrezorMessageEthereum.EthereumGetPublicKey
+import com.satoshilabs.trezor.lib.protobuf.TrezorMessageBitcoin.MessageSignature
+import com.satoshilabs.trezor.lib.protobuf.TrezorMessageBitcoin.SignMessage
 import com.satoshilabs.trezor.lib.protobuf.TrezorMessageEthereum.EthereumMessageSignature
 import com.satoshilabs.trezor.lib.protobuf.TrezorMessageEthereum.EthereumSignMessage
 import com.satoshilabs.trezor.lib.protobuf.TrezorMessageEthereum.EthereumSignTypedHash
@@ -210,6 +212,25 @@ class MessageTypeRegistryTest {
             .build()
 
         assertEquals(2206, MessageTypeRegistry.typeOf(message))
+    }
+
+    @Test
+    fun typeOf_signMessage_returnsMessageTypeNumberThirtyEight() {
+        val message = SignMessage.newBuilder().setMessage(ByteString.copyFrom(byteArrayOf(1))).build()
+
+        assertEquals(38, MessageTypeRegistry.typeOf(message))
+    }
+
+    @Test
+    fun parse_messageSignaturePayload_returnsEquivalentMessage() {
+        val original = MessageSignature.newBuilder()
+            .setSignature(ByteString.copyFrom(byteArrayOf(1, 2, 3)))
+            .setAddress("bc1qexample")
+            .build()
+
+        val parsed = MessageTypeRegistry.parse(40, original.toByteArray())
+
+        assertEquals(original, parsed)
     }
 
     @Test

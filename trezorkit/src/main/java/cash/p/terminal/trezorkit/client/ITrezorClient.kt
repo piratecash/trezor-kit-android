@@ -19,6 +19,14 @@ interface TrezorClientSession {
     /** Signs an EVM transaction on-device, streaming [TrezorEvmTx.data] in chunks as requested. */
     suspend fun signEthereum(tx: TrezorEvmTx): TrezorSignature
 
+    /** Signs a "Bitcoin Signed Message" on-device; the signature carries the BIP-137 header for [scriptType]. */
+    suspend fun signBitcoinMessage(
+        coinName: String,
+        addressN: List<Int>,
+        message: ByteArray,
+        scriptType: TrezorInputScriptType,
+    ): TrezorMessageSignature
+
     /** Signs an EIP-191 personal message on-device (ethereumSignMessage) and returns signature + address. */
     suspend fun signEthereumMessage(addressN: List<Int>, message: ByteArray): TrezorMessageSignature
 

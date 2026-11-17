@@ -9,6 +9,8 @@ import com.google.protobuf.ByteString
 import com.google.protobuf.InvalidProtocolBufferException
 import com.google.protobuf.MessageLite
 import com.satoshilabs.trezor.lib.protobuf.TrezorMessageBitcoin.GetPublicKey
+import com.satoshilabs.trezor.lib.protobuf.TrezorMessageBitcoin.MessageSignature
+import com.satoshilabs.trezor.lib.protobuf.TrezorMessageBitcoin.SignMessage
 import com.satoshilabs.trezor.lib.protobuf.TrezorMessageBitcoin.InputScriptType
 import com.satoshilabs.trezor.lib.protobuf.TrezorMessageBitcoin.OutputScriptType
 import com.satoshilabs.trezor.lib.protobuf.TrezorMessageBitcoin.PrevInput
@@ -226,6 +228,23 @@ private class SessionImpl(
             null
         }
         return definitions.toAck()
+    }
+
+    override suspend fun signBitcoinMessage(
+        coinName: String,
+        addressN: List<Int>,
+        message: ByteArray,
+        scriptType: TrezorInputScriptType,
+    ): TrezorMessageSignature {
+        val request = SignMessage.newBuilder()
+            .addAllAddressN(addressN)
+            .setMessage(ByteString.copyFrom(message))
+            .setCoinName(coinName)
+            .setScriptType(scriptType.toProto())
+            .setNoScriptType(false)
+            .build()
+        val response = exchangeTyped<MessageSignature>(request)
+        return TrezorMessageSignature(signature = response.signature.toByteArray(), address = response.address)
     }
 
     override suspend fun signEthereumMessage(addressN: List<Int>, message: ByteArray): TrezorMessageSignature {

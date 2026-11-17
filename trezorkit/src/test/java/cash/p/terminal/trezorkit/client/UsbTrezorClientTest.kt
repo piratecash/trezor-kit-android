@@ -15,8 +15,10 @@ import com.google.protobuf.ByteString
 import com.satoshilabs.trezor.lib.protobuf.TrezorMessage.MessageType
 import com.satoshilabs.trezor.lib.protobuf.TrezorMessageBitcoin.GetPublicKey
 import com.satoshilabs.trezor.lib.protobuf.TrezorMessageBitcoin.InputScriptType
+import com.satoshilabs.trezor.lib.protobuf.TrezorMessageBitcoin.MessageSignature
 import com.satoshilabs.trezor.lib.protobuf.TrezorMessageBitcoin.OutputScriptType
 import com.satoshilabs.trezor.lib.protobuf.TrezorMessageBitcoin.PublicKey
+import com.satoshilabs.trezor.lib.protobuf.TrezorMessageBitcoin.SignMessage
 import com.satoshilabs.trezor.lib.protobuf.TrezorMessageBitcoin.SignTx
 import com.satoshilabs.trezor.lib.protobuf.TrezorMessageBitcoin.TxAckInput
 import com.satoshilabs.trezor.lib.protobuf.TrezorMessageBitcoin.TxAckOutput
@@ -1068,6 +1070,36 @@ class UsbTrezorClientTest {
         }
 
         assertTrue(caught != null)
+    }
+
+    @Test
+    fun signBitcoinMessage_happyPath_sendsRequestWithScriptTypeAndReturnsSignature() = runTest(UnconfinedTestDispatcher()) {
+        val signature = ByteArray(65) { it.toByte() }
+        val address = "bc1qexample"
+        val response = MessageSignature.newBuilder()
+            .setSignature(ByteString.copyFrom(signature))
+            .setAddress(address)
+            .build()
+        val (client, transport) = clientWithResponses(
+            UnconfinedTestDispatcher(testScheduler),
+            MessageType.MessageType_MessageSignature_VALUE to response.toByteArray(),
+        )
+        val message = "Hello Trezor".toByteArray()
+        val path = listOf(84, 0, 0, 0, 5)
+
+        val result = client.connect {
+            signBitcoinMessage("Bitcoin", path, message, TrezorInputScriptType.SPENDWITNESS)
+        }
+
+        assertEquals(TrezorMessageSignature(signature = signature, address = address), result)
+        val sentMessages = transport.sentMessagesAfterInit()
+        assertEquals(listOf(MessageType.MessageType_SignMessage_VALUE), sentMessages.map { it.msgType })
+        val sentRequest = SignMessage.parseFrom(sentMessages[0].payload)
+        assertEquals(path, sentRequest.addressNList)
+        assertArrayEquals(message, sentRequest.message.toByteArray())
+        assertEquals("Bitcoin", sentRequest.coinName)
+        assertEquals(InputScriptType.SPENDWITNESS, sentRequest.scriptType)
+        assertEquals(false, sentRequest.noScriptType)
     }
 
     @Test

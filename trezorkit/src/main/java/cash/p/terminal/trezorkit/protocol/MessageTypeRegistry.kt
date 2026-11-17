@@ -3,7 +3,9 @@ package cash.p.terminal.trezorkit.protocol
 import com.google.protobuf.MessageLite
 import com.satoshilabs.trezor.lib.protobuf.TrezorMessage.MessageType
 import com.satoshilabs.trezor.lib.protobuf.TrezorMessageBitcoin.GetPublicKey
+import com.satoshilabs.trezor.lib.protobuf.TrezorMessageBitcoin.MessageSignature
 import com.satoshilabs.trezor.lib.protobuf.TrezorMessageBitcoin.PublicKey
+import com.satoshilabs.trezor.lib.protobuf.TrezorMessageBitcoin.SignMessage
 import com.satoshilabs.trezor.lib.protobuf.TrezorMessageBitcoin.SignTx
 import com.satoshilabs.trezor.lib.protobuf.TrezorMessageBitcoin.TxAckInput
 import com.satoshilabs.trezor.lib.protobuf.TrezorMessageBitcoin.TxAckOutput
@@ -76,7 +78,8 @@ import kotlin.reflect.KClass
  * EthereumTxAck, EthereumDefinitionRequest, EthereumDefinitionAck), the EVM personal-message sign flow (EthereumSignMessage,
  * EthereumMessageSignature), the EIP-712 typed-data sign flows (EthereumSignTypedData, the
  * EthereumTypedDataStruct/Value Request+Ack pairs, EthereumSignTypedHash, EthereumTypedDataSignature),
- * and the Bitcoin sign flow (SignTx, TxRequest, and the TxAck family).
+ * the Bitcoin sign flow (SignTx, TxRequest, and the TxAck family), and the Bitcoin message sign
+ * flow (SignMessage, MessageSignature).
  * `HDNodeType` is not registered here - it is an embedded field type nested inside
  * `PublicKey`/`EthereumPublicKey`, never a standalone wire message.
  *
@@ -139,6 +142,8 @@ object MessageTypeRegistry {
             EthereumDefinitionAck::class,
             EthereumDefinitionAck::parseFrom,
         ),
+        Entry(MessageType.MessageType_SignMessage_VALUE, SignMessage::class, SignMessage::parseFrom),
+        Entry(MessageType.MessageType_MessageSignature_VALUE, MessageSignature::class, MessageSignature::parseFrom),
         Entry(MessageType.MessageType_EthereumSignMessage_VALUE, EthereumSignMessage::class, EthereumSignMessage::parseFrom),
         Entry(
             MessageType.MessageType_EthereumMessageSignature_VALUE,
